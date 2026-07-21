@@ -118,9 +118,9 @@ select.fy-select { padding:5px 8px; border-radius:5px; border:1px solid var(--bo
 
     <div class="controls-row">
       <div class="toggle-group" id="viewToggle">
+        <button class="toggle-btn" data-view="day">Daily</button>
         <button class="toggle-btn active" data-view="weekly">Weekly</button>
         <button class="toggle-btn" data-view="period">Period</button>
-        <button class="toggle-btn" data-view="day">Day</button>
       </div>
       <select class="fy-select" id="fySelect">
         <option value="FY26/27">FY 2026/27</option>
@@ -750,9 +750,9 @@ function renderDayTable(){
   const titleEl = document.getElementById("tableTitle");
   const depot = state.selectedDepot;
   const week = CALENDAR.find(w=>w.key===state.selectedWeekKey);
-  if (!week){ container.innerHTML=""; titleEl.textContent="Day Breakdown"; return; }
+  if (!week){ container.innerHTML=""; titleEl.textContent="Daily Breakdown"; return; }
 
-  titleEl.textContent = "Day Breakdown — "+depot+" (Wk "+week.weekNum+", "+week.periodLabel+")";
+  titleEl.textContent = "Daily Breakdown — "+depot+" (Wk "+week.weekNum+", "+week.periodLabel+")";
 
   let html = "<table class='wo-table'><thead><tr>"+
     "<th>Day</th><th>Date</th><th>Scheduled Miles</th><th>Dropped Miles</th><th>Lost %</th><th>Target</th><th>Variance</th><th>Status</th>"+
