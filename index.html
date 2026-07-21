@@ -31,6 +31,9 @@ header .tagline { font-size:10px; opacity:0.55; letter-spacing:0.05em; margin-to
 .upload-btn { background: var(--accent); color:#fff; border:none; border-radius:5px; padding:7px 14px; font-size:13px; cursor:pointer; }
 .upload-btn:hover { background: var(--accent-hover); }
 
+.action-btn { background:#27ae60; color:#fff; border:none; border-radius:5px; padding:4px 12px; font-size:12px; cursor:pointer; }
+.action-btn:hover { background:#219a52; }
+
 .target-input-wrap { display:flex; align-items:center; gap:6px; font-size:12px; }
 .target-input-wrap input { width:60px; padding:4px 6px; border-radius:4px; border:1px solid var(--border); font-size:12px; }
 
@@ -132,15 +135,27 @@ select.fy-select { padding:5px 8px; border-radius:5px; border:1px solid var(--bo
         <option value="FY27/28">FY 2027/28</option>
       </select>
       <select class="fy-select" id="weekSelect" style="display:none"></select>
+      <button class="action-btn" id="copySummaryBtn">📋 Copy Summary</button>
+      <span id="copySummaryStatus" style="font-size:11px;opacity:0.7"></span>
     </div>
 
     <div class="stat-tiles" id="statTiles"></div>
+
+    <div class="panel" id="leaderboardPanel" style="display:none">
+      <h3>Depot Leaderboard — Current Period</h3>
+      <div id="leaderboardContainer"></div>
+    </div>
 
     <div class="panel chart-wrap">
       <h3 id="chartTitle">Lost Miles % Trend</h3>
       <div class="chart-legend" id="chartLegend"></div>
       <div id="chartContainer"></div>
       <div class="tooltip-box" id="tooltipBox"></div>
+    </div>
+
+    <div class="panel" id="weatherImpactPanel" style="display:none">
+      <h3>Weather Impact</h3>
+      <div id="weatherImpactContainer"></div>
     </div>
 
     <div class="panel">
@@ -659,6 +674,68 @@ function weatherStatusNote(depot, fyLabel){
   return "";
 }
 
+function median(values){
+  if (!values.length) return null;
+  const sorted = [...values].sort((a,b)=>a-b);
+  const mid = Math.floor(sorted.length/2);
+  return sorted.length%2 ? sorted[mid] : (sorted[mid-1]+sorted[mid])/2;
+}
+
+function weightedPct(rows){
+  let s=0,d=0;
+  rows.forEach(r=>{ s+=r.scheduledMiles; d+=r.droppedMiles; });
+  return s>0 ? d/s*100 : null;
+}
+
+// Joins this depot's daily lost-miles rows to its resolved weather (by dateKey), then buckets
+// into wet/dry (rainfall > 1mm, the standard "measurable precipitation" cutoff) and
+// warmer/cooler (split at the median max-temp seen, so there's no fixed seasonal threshold).
+// Averages are weighted (sum dropped / sum scheduled), same rule as every other rollup here.
+function computeWeatherImpact(depot, fyLabel){
+  if (depot===ALL_DEPOTS_KEY) return null;
+  const weatherMap = getWeatherIfReady(depot, fyLabel);
+  if (!weatherMap) return null;
+
+  const joined = [];
+  (dayLookup[depot] || new Map()).forEach(row=>{
+    if (row.isFuture || row.lostMilesPct==null) return;
+    const w = weatherMap[row.dateKey];
+    if (!w) return;
+    joined.push({ scheduledMiles: row.scheduledMiles, droppedMiles: row.droppedMiles, rainfall: w.rainfall, maxTemp: w.maxTemp });
+  });
+  if (joined.length===0) return null;
+
+  const medianTemp = median(joined.map(j=>j.maxTemp).filter(v=>v!=null));
+  const wet = joined.filter(j=>j.rainfall!=null && j.rainfall>1);
+  const dry = joined.filter(j=>j.rainfall!=null && j.rainfall<=1);
+  const warmer = medianTemp!=null ? joined.filter(j=>j.maxTemp!=null && j.maxTemp>medianTemp) : [];
+  const cooler = medianTemp!=null ? joined.filter(j=>j.maxTemp!=null && j.maxTemp<=medianTemp) : [];
+
+  return {
+    wet: { pct: weightedPct(wet), count: wet.length },
+    dry: { pct: weightedPct(dry), count: dry.length },
+    warmer: { pct: weightedPct(warmer), count: warmer.length },
+    cooler: { pct: weightedPct(cooler), count: cooler.length },
+    medianTemp
+  };
+}
+
+function renderWeatherImpact(){
+  const panel = document.getElementById("weatherImpactPanel");
+  const impact = computeWeatherImpact(state.selectedDepot, state.fyLabel);
+  if (!impact){ panel.style.display="none"; return; }
+  panel.style.display="";
+
+  const fmt = b => b.pct==null ? "—" : b.pct.toFixed(2)+"% ("+b.count+" day"+(b.count===1?"":"s")+")";
+  document.getElementById("weatherImpactContainer").innerHTML =
+    "<div style='font-size:13px'>"+
+    "Wet days (&gt;1mm): <strong>"+fmt(impact.wet)+"</strong> &nbsp;·&nbsp; Dry days: <strong>"+fmt(impact.dry)+"</strong><br>"+
+    (impact.medianTemp!=null
+      ? "Warmer days (&gt;"+impact.medianTemp.toFixed(0)+"°C): <strong>"+fmt(impact.warmer)+"</strong> &nbsp;·&nbsp; Cooler days: <strong>"+fmt(impact.cooler)+"</strong>"
+      : "")+
+    "</div>";
+}
+
 // ---------- CHART ----------
 function formatSeriesValue(value, unit){
   if (unit==="mm") return value.toFixed(1)+"mm";
@@ -873,6 +950,9 @@ function ragClass(pct){
 }
 
 // ---------- RENDER: SIDEBAR ----------
+const TREND_ARROW = { up:"▲", down:"▼", flat:"–" };
+const TREND_COLOR = { up:"#c0392b", down:"#27ae60", flat:"#6b6b8a" };
+
 function renderDepotNav(){
   const el = document.getElementById("depotNav");
   el.innerHTML = "";
@@ -880,29 +960,68 @@ function renderDepotNav(){
     const div = document.createElement("div");
     div.className = "nav-item"+(depot===state.selectedDepot?" active":"");
     const hasData = depot===ALL_DEPOTS_KEY || (state.rawData && state.rawData[depot] && state.rawData[depot].length>0);
-    div.innerHTML = "<span>"+depot+"</span>"+(hasData?"":"<span class='badge-nodata'>no data</span>");
+    let trendHtml = "";
+    if (depot!==ALL_DEPOTS_KEY){
+      const trend = getPeriodTrend(depot);
+      if (trend){
+        const sign = trend.delta>=0 ? "+" : "";
+        trendHtml = "<span title='"+sign+trend.delta.toFixed(2)+"pp vs previous period' style='color:"+TREND_COLOR[trend.arrow]+";font-size:11px;margin-left:6px'>"+TREND_ARROW[trend.arrow]+"</span>";
+      }
+    }
+    div.innerHTML = "<span>"+depot+trendHtml+"</span>"+(hasData?"":"<span class='badge-nodata'>no data</span>");
     div.addEventListener("click", ()=>{ state.selectedDepot=depot; renderAll(); });
     el.appendChild(div);
   });
+}
+
+// Core per-depot summary (YTD lost%, current-period lost%) shared by the stat tiles,
+// the leaderboard, trend arrows, and the copy-summary export — one place computes it.
+function getDepotSummary(depot, fyLabel){
+  const weeksInFY = CALENDAR.filter(w=>w.fyLabel===fyLabel);
+  const ytdWeeks = weeksInFY.filter(w=>w.status!=="future");
+  let sSum=0,dSum=0;
+  ytdWeeks.forEach(w=>{ const r=weeklyRollups[depot][w.key]; sSum+=r.scheduledSum; dSum+=r.droppedSum; });
+  const ytdPct = sSum>0 ? dSum/sSum*100 : null;
+
+  const currentWeek = weeksInFY.find(w=>w.status==="in-progress") || [...weeksInFY].reverse().find(w=>w.status==="complete");
+  const periodKey = currentWeek ? fyLabel+"-P"+currentWeek.periodNum : null;
+  const periodRoll = periodKey ? periodRollups[depot][periodKey] : null;
+  const periodPct = (periodRoll && periodRoll.lostPct!=null) ? periodRoll.lostPct : null;
+
+  return { ytdPct, periodPct, periodRoll, currentWeek };
+}
+
+// Period-over-period trend for the sidebar arrows: current period's lost% vs the previous
+// period's (wrapping to the prior FY's Period 12 when the current period is Period 1).
+function getPeriodTrend(depot){
+  const summary = getDepotSummary(depot, state.fyLabel);
+  if (!summary.currentWeek || summary.periodPct==null) return null;
+
+  const periodNum = summary.currentWeek.periodNum;
+  let prevFyLabel = state.fyLabel, prevPeriodNum = periodNum-1;
+  if (prevPeriodNum < 1){
+    const fyIdx = CONFIG.fy.findIndex(f=>f.label===state.fyLabel);
+    if (fyIdx<=0) return null;
+    prevFyLabel = CONFIG.fy[fyIdx-1].label;
+    prevPeriodNum = 12;
+  }
+  const prevRoll = periodRollups[depot] && periodRollups[depot][prevFyLabel+"-P"+prevPeriodNum];
+  if (!prevRoll || prevRoll.lostPct==null) return null;
+
+  const delta = summary.periodPct - prevRoll.lostPct;
+  const arrow = delta > 0.02 ? "up" : delta < -0.02 ? "down" : "flat";
+  return { arrow, delta };
 }
 
 // ---------- RENDER: STAT TILES ----------
 function renderStatTiles(){
   const el = document.getElementById("statTiles");
   el.innerHTML = "";
-  const weeksInFY = CALENDAR.filter(w=>w.fyLabel===state.fyLabel);
-  const ytdWeeks = weeksInFY.filter(w=>w.status!=="future");
-  let sSum=0,dSum=0;
-  ytdWeeks.forEach(w=>{ const r=weeklyRollups[state.selectedDepot][w.key]; sSum+=r.scheduledSum; dSum+=r.droppedSum; });
-  const ytdPct = sSum>0 ? dSum/sSum*100 : null;
-
-  const currentWeek = weeksInFY.find(w=>w.status==="in-progress") || [...weeksInFY].reverse().find(w=>w.status==="complete");
-  const periodKey = currentWeek ? state.fyLabel+"-P"+currentWeek.periodNum : null;
-  const periodRoll = periodKey ? periodRollups[state.selectedDepot][periodKey] : null;
+  const summary = getDepotSummary(state.selectedDepot, state.fyLabel);
 
   const tiles = [
-    { label:"YTD Lost %", value: ytdPct==null?"—":ytdPct.toFixed(2)+"%", cls: ragClass(ytdPct) },
-    { label:"Current Period Lost %", value: (periodRoll && periodRoll.lostPct!=null)?periodRoll.lostPct.toFixed(2)+"%":"—", cls: periodRoll?ragClass(periodRoll.lostPct):"" },
+    { label:"YTD Lost %", value: summary.ytdPct==null?"—":summary.ytdPct.toFixed(2)+"%", cls: ragClass(summary.ytdPct) },
+    { label:"Current Period Lost %", value: summary.periodPct==null?"—":summary.periodPct.toFixed(2)+"%", cls: summary.periodRoll?ragClass(summary.periodPct):"" },
     { label:"Target", value: state.target.toFixed(2)+"%", cls:"" }
   ];
   tiles.forEach(t=>{
@@ -910,6 +1029,89 @@ function renderStatTiles(){
     div.className="stat-tile";
     div.innerHTML = "<div class='label'>"+t.label+"</div><div class='value "+t.cls+"'>"+t.value+"</div>";
     el.appendChild(div);
+  });
+}
+
+// ---------- RENDER: LEADERBOARD (All Depots only) ----------
+function getLeaderboardRows(fyLabel){
+  return DEPOTS.map(depot => ({ depot, ...getDepotSummary(depot, fyLabel) }))
+    .sort((a,b) => {
+      if (a.periodPct==null && b.periodPct==null) return 0;
+      if (a.periodPct==null) return 1;
+      if (b.periodPct==null) return -1;
+      return a.periodPct - b.periodPct;
+    });
+}
+
+function buildSummaryText(){
+  const lines = [];
+  if (state.selectedDepot === ALL_DEPOTS_KEY){
+    lines.push("Lost Miles Tracker — All Depots Leaderboard ("+state.fyLabel+")");
+    lines.push("Target: "+state.target.toFixed(2)+"%");
+    lines.push("");
+    getLeaderboardRows(state.fyLabel).forEach((r,idx)=>{
+      lines.push((idx+1)+". "+r.depot+" — YTD "+(r.ytdPct==null?"—":r.ytdPct.toFixed(2)+"%")+
+        " · Current Period "+(r.periodPct==null?"—":r.periodPct.toFixed(2)+"%"));
+    });
+  } else {
+    const depot = state.selectedDepot;
+    const summary = getDepotSummary(depot, state.fyLabel);
+    lines.push("Lost Miles Tracker — "+depot+" ("+state.fyLabel+")");
+    lines.push("Current Period: "+(summary.currentWeek ? summary.currentWeek.periodLabel : "—"));
+    lines.push("Target: "+state.target.toFixed(2)+"%");
+    lines.push("YTD Lost %: "+(summary.ytdPct==null?"—":summary.ytdPct.toFixed(2)+"%"));
+    if (summary.periodPct!=null){
+      const variance = summary.periodPct - state.target;
+      lines.push("Current Period Lost %: "+summary.periodPct.toFixed(2)+"% (variance "+(variance>=0?"+":"")+variance.toFixed(2)+"pp)");
+    } else {
+      lines.push("Current Period Lost %: —");
+    }
+    const impact = computeWeatherImpact(depot, state.fyLabel);
+    if (impact){
+      lines.push("Wet days (>1mm): "+(impact.wet.pct==null?"—":impact.wet.pct.toFixed(2)+"%")+" · Dry days: "+(impact.dry.pct==null?"—":impact.dry.pct.toFixed(2)+"%"));
+    }
+  }
+  return lines.join("\n");
+}
+
+function copyViaTextarea(text){
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); } catch(e){ /* best effort fallback */ }
+  document.body.removeChild(ta);
+}
+
+function renderLeaderboard(){
+  const panel = document.getElementById("leaderboardPanel");
+  if (state.selectedDepot !== ALL_DEPOTS_KEY){ panel.style.display="none"; return; }
+  panel.style.display="";
+
+  const rows = getLeaderboardRows(state.fyLabel);
+  let html = "<table class='wo-table'><thead><tr>"+
+    "<th>Rank</th><th>Depot</th><th>YTD Lost %</th><th>Current Period Lost %</th><th>Status</th>"+
+    "</tr></thead><tbody>";
+  rows.forEach((r,idx)=>{
+    const rowClass = r.periodPct==null ? "" : "row-"+ragClass(r.periodPct);
+    const badge = r.periodPct==null ? "<span class='badge-navy'>No data</span>"
+      : "<span class='badge-"+ragClass(r.periodPct)+"'>"+ragClass(r.periodPct).toUpperCase()+"</span>";
+    html += "<tr class='"+rowClass+"' style='cursor:pointer' data-depot=\""+escapeHtml(r.depot)+"\">"+
+      "<td>"+(idx+1)+"</td>"+
+      "<td>"+escapeHtml(r.depot)+"</td>"+
+      "<td class='num'>"+(r.ytdPct==null?"—":r.ytdPct.toFixed(2)+"%")+"</td>"+
+      "<td class='num'>"+(r.periodPct==null?"—":r.periodPct.toFixed(2)+"%")+"</td>"+
+      "<td>"+badge+"</td>"+
+    "</tr>";
+  });
+  html += "</tbody></table>";
+
+  const container = document.getElementById("leaderboardContainer");
+  container.innerHTML = html;
+  container.querySelectorAll("tbody tr").forEach(tr=>{
+    tr.addEventListener("click", ()=>{ state.selectedDepot = tr.dataset.depot; renderAll(); });
   });
 }
 
@@ -1202,8 +1404,10 @@ function renderAll(){
   renderDepotNav();
   renderWeekSelect();
   renderStatTiles();
+  renderLeaderboard();
   renderTable();
   renderChartPanel();
+  renderWeatherImpact();
   renderWarnings();
 }
 
@@ -1271,6 +1475,17 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("weekSelect").addEventListener("change", (e)=>{
     state.selectedWeekKey = e.target.value;
     renderAll();
+  });
+
+  document.getElementById("copySummaryBtn").addEventListener("click", ()=>{
+    const text = buildSummaryText();
+    const statusEl = document.getElementById("copySummaryStatus");
+    const showCopied = () => { statusEl.textContent = "Copied!"; setTimeout(()=>{ statusEl.textContent=""; }, 2000); };
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(showCopied).catch(()=>{ copyViaTextarea(text); showCopied(); });
+    } else {
+      copyViaTextarea(text); showCopied();
+    }
   });
 
   const saved = loadState();
