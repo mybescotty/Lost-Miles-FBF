@@ -437,6 +437,36 @@ function computeRunRate(depot, weeksInScope, weeklyRollups, target){
   return { requiredPct: Math.max(0, allowedRemaining)/sRem*100, reachable: allowedRemaining >= 0 };
 }
 
+// Same shape as computeRunRate, but scoped to the 7 days of a single week rather than a
+// list of WeekDescriptors, for the Day view's "what's needed for the rest of this week" line.
+function computeDayRunRate(depot, week, target){
+  const today = todayMidnight();
+  let sDone=0, dDone=0, daysWithData=0, remainingCount=0;
+  let d = new Date(week.weekStart);
+  for (let i=0;i<7;i++){
+    const key = dateKey(d);
+    if (d >= today){
+      remainingCount++;
+    } else {
+      const row = getDayRow(depot, key);
+      if (row && row.lostMilesPct!=null){
+        sDone += row.scheduledMiles;
+        dDone += row.droppedMiles;
+        daysWithData++;
+      }
+    }
+    d = addDays(d,1);
+  }
+  if (remainingCount===0 || daysWithData===0) return null;
+
+  const avgPerDay = sDone/daysWithData;
+  const sRem = avgPerDay*remainingCount;
+  if (sRem===0) return null;
+
+  const allowedRemaining = (target/100)*(sDone+sRem) - dDone;
+  return { requiredPct: Math.max(0, allowedRemaining)/sRem*100, reachable: allowedRemaining >= 0 };
+}
+
 // ---------- PERSISTENCE ----------
 function saveState(rawData, target){
   try {
@@ -797,9 +827,28 @@ function renderDayChart(){
     { name:"Target", type:"flat", color:"#27ae60", value: state.target, dashed:true }
   ];
 
+  const runRate = computeDayRunRate(depot, week, state.target);
+  let runRateNote = "";
+  if (runRate){
+    const lastActual = [...points].reverse().find(p=>p.value!=null);
+    if (lastActual){
+      const runRatePoints = points.map(p=>
+        p.i < lastActual.i ? {i:p.i, value:null} :
+        p.i===lastActual.i ? {i:p.i, value:lastActual.value} :
+        {i:p.i, value:runRate.requiredPct}
+      );
+      series.push({ name:"Required run-rate", type:"line", color:"#E5007D", points:runRatePoints, dashed:true, pointsRender:false });
+    }
+    runRateNote = runRate.reachable
+      ? "Needs "+runRate.requiredPct.toFixed(2)+"% or better on the rest of the week to hit target."
+      : "Target no longer reachable this week — minimum needed is 0%.";
+  }
+
   document.getElementById("chartLegend").innerHTML =
     "<span><span class='legend-swatch' style='border-color:#2D2A6E'></span>Actual</span>"+
-    "<span><span class='legend-swatch' style='border-color:#27ae60;border-top-style:dashed'></span>Target ("+state.target.toFixed(2)+"%)</span>";
+    "<span><span class='legend-swatch' style='border-color:#27ae60;border-top-style:dashed'></span>Target ("+state.target.toFixed(2)+"%)</span>"+
+    (runRate?"<span><span class='legend-swatch' style='border-color:#E5007D;border-top-style:dashed'></span>Required run-rate</span>":"")+
+    (runRateNote?"<div style='width:100%;margin-top:4px'>"+runRateNote+"</div>":"");
 
   renderChart(document.getElementById("chartContainer"), series, { labels, target: state.target, tooltip: document.getElementById("tooltipBox") });
 }
