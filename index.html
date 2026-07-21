@@ -52,6 +52,9 @@ header .tagline { font-size:10px; opacity:0.55; letter-spacing:0.05em; margin-to
 select.fy-select { padding:5px 8px; border-radius:5px; border:1px solid var(--border); font-size:12px; }
 
 .warning-banner { background: var(--row-amber); border-left:4px solid #e67e22; padding:8px 12px; font-size:12px; border-radius:4px; margin-bottom:14px; line-height:1.5; }
+.warning-banner summary { cursor:pointer; font-weight:600; color:#8a5a00; }
+.warning-banner .warning-list { margin-top:6px; }
+.wo-table tfoot td { font-weight:600; border-top:2px solid var(--border); border-bottom:none; }
 
 .stat-tiles { display:flex; gap:12px; margin-bottom:18px; flex-wrap:wrap; }
 .stat-tile { background:var(--bg-panel); border:1px solid var(--border); border-radius:8px; padding:10px 16px; min-width:140px; }
@@ -117,11 +120,13 @@ select.fy-select { padding:5px 8px; border-radius:5px; border:1px solid var(--bo
       <div class="toggle-group" id="viewToggle">
         <button class="toggle-btn active" data-view="weekly">Weekly</button>
         <button class="toggle-btn" data-view="period">Period</button>
+        <button class="toggle-btn" data-view="day">Day</button>
       </div>
       <select class="fy-select" id="fySelect">
         <option value="FY26/27">FY 2026/27</option>
         <option value="FY27/28">FY 2027/28</option>
       </select>
+      <select class="fy-select" id="weekSelect" style="display:none"></select>
     </div>
 
     <div class="stat-tiles" id="statTiles"></div>
@@ -566,12 +571,23 @@ let state = {
   selectedDepot: ALL_DEPOTS_KEY,
   view: "weekly",
   fyLabel: CONFIG.fy[0].label,
+  selectedWeekKey: null,
 };
-let weeklyRollups = null, periodRollups = null;
+let weeklyRollups = null, periodRollups = null, dayLookup = null;
 
 function recompute(){
   weeklyRollups = buildWeeklyRollups(state.rawData || {});
   periodRollups = buildPeriodRollups(weeklyRollups);
+  dayLookup = {};
+  DEPOTS.forEach(d => { dayLookup[d] = new Map((state.rawData && state.rawData[d] || []).map(row=>[row.dateKey,row])); });
+}
+
+// Picks the "current" week within an FY: in-progress if one exists, else the most recently
+// completed week, else the first week — same rule used for stat tiles and the chart's default scope.
+function defaultWeekKeyForFY(fyLabel){
+  const weeksInFY = CALENDAR.filter(w=>w.fyLabel===fyLabel);
+  const week = weeksInFY.find(w=>w.status==="in-progress") || [...weeksInFY].reverse().find(w=>w.status==="complete") || weeksInFY[0];
+  return week ? week.key : null;
 }
 
 function ragClass(pct){
@@ -624,6 +640,8 @@ function renderStatTiles(){
 
 // ---------- RENDER: TABLE ----------
 function renderTable(){
+  if (state.view==="day"){ renderDayTable(); return; }
+
   const container = document.getElementById("tableContainer");
   const titleEl = document.getElementById("tableTitle");
   const depot = state.selectedDepot;
@@ -678,8 +696,118 @@ function renderTable(){
   container.innerHTML = html;
 }
 
+const DAY_NAMES = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+
+function getDayRow(depot, dateKey){
+  if (depot===ALL_DEPOTS_KEY){
+    let scheduledMiles=0, droppedMiles=0, lostMilesPct=null, found=false;
+    DEPOTS.forEach(d=>{
+      const row = dayLookup[d].get(dateKey);
+      if (!row) return;
+      found = true;
+      scheduledMiles += row.scheduledMiles;
+      if (row.lostMilesPct!=null) droppedMiles += row.droppedMiles;
+    });
+    if (!found) return null;
+    lostMilesPct = scheduledMiles>0 ? droppedMiles/scheduledMiles*100 : null;
+    return { scheduledMiles, droppedMiles, lostMilesPct };
+  }
+  return dayLookup[depot].get(dateKey) || null;
+}
+
+function renderDayTable(){
+  const container = document.getElementById("tableContainer");
+  const titleEl = document.getElementById("tableTitle");
+  const depot = state.selectedDepot;
+  const week = CALENDAR.find(w=>w.key===state.selectedWeekKey);
+  if (!week){ container.innerHTML=""; titleEl.textContent="Day Breakdown"; return; }
+
+  titleEl.textContent = "Day Breakdown — "+depot+" (Wk "+week.weekNum+", "+week.periodLabel+")";
+
+  let html = "<table class='wo-table'><thead><tr>"+
+    "<th>Day</th><th>Date</th><th>Scheduled Miles</th><th>Dropped Miles</th><th>Lost %</th><th>Target</th><th>Variance</th><th>Status</th>"+
+    "</tr></thead><tbody>";
+
+  const today = todayMidnight();
+  let d = new Date(week.weekStart);
+  for (let i=0;i<7;i++){
+    const key = dateKey(d);
+    const future = d >= today;
+    const dayRow = future ? null : getDayRow(depot, key);
+    const noData = !future && (!dayRow || dayRow.lostMilesPct==null);
+    const blank = future || noData;
+    const lostPct = blank ? null : dayRow.lostMilesPct;
+    const rowClass = future ? "row-future" : noData ? "" : "row-"+ragClass(lostPct);
+    const lostStr = blank ? "—" : lostPct.toFixed(2)+"%";
+    const variance = blank ? "—" : (lostPct-state.target>=0?"+":"")+(lostPct-state.target).toFixed(2)+"pp";
+    const statusBadge = future ? "<span class='badge-navy'>Upcoming</span>"
+      : noData ? "<span class='badge-navy'>No data</span>"
+      : "<span class='badge-green'>Complete</span>";
+    html += "<tr class='"+rowClass+"'>"+
+      "<td>"+DAY_NAMES[i]+"</td>"+
+      "<td>"+d.toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})+"</td>"+
+      "<td class='num'>"+(blank?"—":Math.round(dayRow.scheduledMiles).toLocaleString())+"</td>"+
+      "<td class='num'>"+(blank?"—":dayRow.droppedMiles.toFixed(1))+"</td>"+
+      "<td class='num'>"+lostStr+"</td>"+
+      "<td class='num'>"+state.target.toFixed(2)+"%</td>"+
+      "<td class='num'>"+variance+"</td>"+
+      "<td>"+statusBadge+"</td>"+
+    "</tr>";
+    d = addDays(d,1);
+  }
+
+  const weekRoll = weeklyRollups[depot][week.key];
+  const weekLostStr = weekRoll.lostPct==null ? "—" : weekRoll.lostPct.toFixed(2)+"%";
+  const weekVariance = weekRoll.lostPct==null ? "—" : (weekRoll.lostPct-state.target>=0?"+":"")+(weekRoll.lostPct-state.target).toFixed(2)+"pp";
+  html += "</tbody><tfoot><tr>"+
+    "<td colspan='2'>Week Total</td>"+
+    "<td class='num'>"+(weekRoll.scheduledSum>0?Math.round(weekRoll.scheduledSum).toLocaleString():"—")+"</td>"+
+    "<td class='num'>"+(weekRoll.scheduledSum>0?weekRoll.droppedSum.toFixed(1):"—")+"</td>"+
+    "<td class='num'>"+weekLostStr+"</td>"+
+    "<td class='num'>"+state.target.toFixed(2)+"%</td>"+
+    "<td class='num'>"+weekVariance+"</td>"+
+    "<td></td>"+
+  "</tr></tfoot>";
+  html += "</table>";
+  container.innerHTML = html;
+}
+
 // ---------- RENDER: CHART PANEL ----------
+function renderDayChart(){
+  const depot = state.selectedDepot;
+  const week = CALENDAR.find(w=>w.key===state.selectedWeekKey);
+  document.getElementById("chartTitle").textContent = week ? "Lost Miles % — Wk "+week.weekNum : "Lost Miles % Trend";
+  if (!week){ document.getElementById("chartLegend").innerHTML=""; document.getElementById("chartContainer").innerHTML=""; return; }
+
+  const today = todayMidnight();
+  const labels = [];
+  const points = [];
+  let d = new Date(week.weekStart);
+  for (let i=0;i<7;i++){
+    const key = dateKey(d);
+    const future = d >= today;
+    const dayRow = future ? null : getDayRow(depot, key);
+    labels.push(DAY_NAMES[i]);
+    points.push({ i, value: (future || !dayRow) ? null : dayRow.lostMilesPct });
+    d = addDays(d,1);
+  }
+
+  const series = [
+    { name:"Actual", type:"line", color:"#2D2A6E", points, dashed:false },
+    { name:"Target", type:"flat", color:"#27ae60", value: state.target, dashed:true }
+  ];
+
+  document.getElementById("chartLegend").innerHTML =
+    "<span><span class='legend-swatch' style='border-color:#2D2A6E'></span>Actual</span>"+
+    "<span><span class='legend-swatch' style='border-color:#27ae60;border-top-style:dashed'></span>Target ("+state.target.toFixed(2)+"%)</span>";
+
+  renderChart(document.getElementById("chartContainer"), series, { labels, target: state.target, tooltip: document.getElementById("tooltipBox") });
+}
+
 function renderChartPanel(){
+  if (state.view==="day"){ renderDayChart(); return; }
+  document.getElementById("chartTitle").textContent = "Lost Miles % Trend";
+
   const depot = state.selectedDepot;
   const isWeekly = state.view==="weekly";
   const weeksInFY = CALENDAR.filter(w=>w.fyLabel===state.fyLabel);
@@ -738,12 +866,28 @@ function escapeHtml(s){ const d=document.createElement("div"); d.textContent=s; 
 function renderWarnings(){
   const el = document.getElementById("warningBanner");
   if (!warnings.length){ el.innerHTML=""; return; }
-  el.innerHTML = "<div class='warning-banner'>"+warnings.slice(0,6).map(escapeHtml).join("<br>")+
-    (warnings.length>6?"<br>+"+(warnings.length-6)+" more…":"")+"</div>";
+  el.innerHTML = "<details class='warning-banner'><summary>⚠ "+warnings.length+" data notice"+(warnings.length===1?"":"s")+" — click to expand</summary>"+
+    "<div class='warning-list'>"+warnings.map(escapeHtml).join("<br>")+"</div></details>";
+}
+
+function renderWeekSelect(){
+  const sel = document.getElementById("weekSelect");
+  sel.style.display = state.view==="day" ? "" : "none";
+  if (state.view!=="day") return;
+
+  const weeksInFY = CALENDAR.filter(w=>w.fyLabel===state.fyLabel);
+  const stillValid = state.selectedWeekKey && weeksInFY.some(w=>w.key===state.selectedWeekKey);
+  if (!stillValid) state.selectedWeekKey = defaultWeekKeyForFY(state.fyLabel);
+
+  sel.innerHTML = weeksInFY.map(w=>
+    "<option value='"+w.key+"'"+(w.key===state.selectedWeekKey?" selected":"")+">"+
+    "Wk "+w.weekNum+" · "+w.periodLabel+" · "+fmtRange(w.weekStart,w.weekEnd)+"</option>"
+  ).join("");
 }
 
 function renderAll(){
   renderDepotNav();
+  renderWeekSelect();
   renderStatTiles();
   renderTable();
   renderChartPanel();
@@ -791,6 +935,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("fySelect").addEventListener("change", (e)=>{
     state.fyLabel = e.target.value;
+    state.selectedWeekKey = null; // force re-default for the new FY
+    renderAll();
+  });
+
+  document.getElementById("weekSelect").addEventListener("change", (e)=>{
+    state.selectedWeekKey = e.target.value;
     renderAll();
   });
 
