@@ -135,8 +135,7 @@ select.fy-select { padding:5px 8px; border-radius:5px; border:1px solid var(--bo
         <option value="FY27/28">FY 2027/28</option>
       </select>
       <select class="fy-select" id="weekSelect" style="display:none"></select>
-      <button class="action-btn" id="copySummaryBtn">📋 Copy Summary</button>
-      <span id="copySummaryStatus" style="font-size:11px;opacity:0.7"></span>
+      <button class="action-btn" id="emailSummaryBtn">📧 Email Summary</button>
     </div>
 
     <div class="stat-tiles" id="statTiles"></div>
@@ -978,17 +977,19 @@ function renderDepotNav(){
 // the leaderboard, trend arrows, and the copy-summary export — one place computes it.
 function getDepotSummary(depot, fyLabel){
   const weeksInFY = CALENDAR.filter(w=>w.fyLabel===fyLabel);
-  const ytdWeeks = weeksInFY.filter(w=>w.status!=="future");
-  let sSum=0,dSum=0;
-  ytdWeeks.forEach(w=>{ const r=weeklyRollups[depot][w.key]; sSum+=r.scheduledSum; dSum+=r.droppedSum; });
-  const ytdPct = sSum>0 ? dSum/sSum*100 : null;
 
   const currentWeek = weeksInFY.find(w=>w.status==="in-progress") || [...weeksInFY].reverse().find(w=>w.status==="complete");
   const periodKey = currentWeek ? fyLabel+"-P"+currentWeek.periodNum : null;
   const periodRoll = periodKey ? periodRollups[depot][periodKey] : null;
   const periodPct = (periodRoll && periodRoll.lostPct!=null) ? periodRoll.lostPct : null;
 
-  return { ytdPct, periodPct, periodRoll, currentWeek };
+  const weekRoll = currentWeek ? weeklyRollups[depot][currentWeek.key] : null;
+  const weekPct = (weekRoll && weekRoll.lostPct!=null) ? weekRoll.lostPct : null;
+
+  const yesterdayRow = getDayRow(depot, dateKey(addDays(todayMidnight(), -1)));
+  const yesterdayPct = (yesterdayRow && yesterdayRow.lostMilesPct!=null) ? yesterdayRow.lostMilesPct : null;
+
+  return { yesterdayPct, weekPct, periodPct, periodRoll, currentWeek };
 }
 
 // Period-over-period trend for the sidebar arrows: current period's lost% vs the previous
@@ -1020,7 +1021,8 @@ function renderStatTiles(){
   const summary = getDepotSummary(state.selectedDepot, state.fyLabel);
 
   const tiles = [
-    { label:"YTD Lost %", value: summary.ytdPct==null?"—":summary.ytdPct.toFixed(2)+"%", cls: ragClass(summary.ytdPct) },
+    { label:"Yesterday Lost %", value: summary.yesterdayPct==null?"—":summary.yesterdayPct.toFixed(2)+"%", cls: ragClass(summary.yesterdayPct) },
+    { label:"Current Week Lost %", value: summary.weekPct==null?"—":summary.weekPct.toFixed(2)+"%", cls: ragClass(summary.weekPct) },
     { label:"Current Period Lost %", value: summary.periodPct==null?"—":summary.periodPct.toFixed(2)+"%", cls: summary.periodRoll?ragClass(summary.periodPct):"" },
     { label:"Target", value: state.target.toFixed(2)+"%", cls:"" }
   ];
@@ -1050,7 +1052,7 @@ function buildSummaryText(){
     lines.push("Target: "+state.target.toFixed(2)+"%");
     lines.push("");
     getLeaderboardRows(state.fyLabel).forEach((r,idx)=>{
-      lines.push((idx+1)+". "+r.depot+" — YTD "+(r.ytdPct==null?"—":r.ytdPct.toFixed(2)+"%")+
+      lines.push((idx+1)+". "+r.depot+" — Current Week "+(r.weekPct==null?"—":r.weekPct.toFixed(2)+"%")+
         " · Current Period "+(r.periodPct==null?"—":r.periodPct.toFixed(2)+"%"));
     });
   } else {
@@ -1059,7 +1061,8 @@ function buildSummaryText(){
     lines.push("Lost Miles Tracker — "+depot+" ("+state.fyLabel+")");
     lines.push("Current Period: "+(summary.currentWeek ? summary.currentWeek.periodLabel : "—"));
     lines.push("Target: "+state.target.toFixed(2)+"%");
-    lines.push("YTD Lost %: "+(summary.ytdPct==null?"—":summary.ytdPct.toFixed(2)+"%"));
+    lines.push("Yesterday Lost %: "+(summary.yesterdayPct==null?"—":summary.yesterdayPct.toFixed(2)+"%"));
+    lines.push("Current Week Lost %: "+(summary.weekPct==null?"—":summary.weekPct.toFixed(2)+"%"));
     if (summary.periodPct!=null){
       const variance = summary.periodPct - state.target;
       lines.push("Current Period Lost %: "+summary.periodPct.toFixed(2)+"% (variance "+(variance>=0?"+":"")+variance.toFixed(2)+"pp)");
@@ -1074,15 +1077,17 @@ function buildSummaryText(){
   return lines.join("\n");
 }
 
-function copyViaTextarea(text){
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.style.position = "fixed";
-  ta.style.opacity = "0";
-  document.body.appendChild(ta);
-  ta.select();
-  try { document.execCommand("copy"); } catch(e){ /* best effort fallback */ }
-  document.body.removeChild(ta);
+function buildMailtoHref(){
+  const depot = state.selectedDepot;
+  const body = buildSummaryText();
+  let subject;
+  if (depot === ALL_DEPOTS_KEY){
+    subject = "Lost Miles Summary — All Depots ("+state.fyLabel+")";
+  } else {
+    const summary = getDepotSummary(depot, state.fyLabel);
+    subject = "Lost Miles Summary — "+depot+" ("+(summary.currentWeek ? summary.currentWeek.periodLabel : state.fyLabel)+")";
+  }
+  return "mailto:?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body.replace(/\n/g,"\r\n"));
 }
 
 function renderLeaderboard(){
@@ -1092,7 +1097,7 @@ function renderLeaderboard(){
 
   const rows = getLeaderboardRows(state.fyLabel);
   let html = "<table class='wo-table'><thead><tr>"+
-    "<th>Rank</th><th>Depot</th><th>YTD Lost %</th><th>Current Period Lost %</th><th>Status</th>"+
+    "<th>Rank</th><th>Depot</th><th>Current Week Lost %</th><th>Current Period Lost %</th><th>Status</th>"+
     "</tr></thead><tbody>";
   rows.forEach((r,idx)=>{
     const rowClass = r.periodPct==null ? "" : "row-"+ragClass(r.periodPct);
@@ -1101,7 +1106,7 @@ function renderLeaderboard(){
     html += "<tr class='"+rowClass+"' style='cursor:pointer' data-depot=\""+escapeHtml(r.depot)+"\">"+
       "<td>"+(idx+1)+"</td>"+
       "<td>"+escapeHtml(r.depot)+"</td>"+
-      "<td class='num'>"+(r.ytdPct==null?"—":r.ytdPct.toFixed(2)+"%")+"</td>"+
+      "<td class='num'>"+(r.weekPct==null?"—":r.weekPct.toFixed(2)+"%")+"</td>"+
       "<td class='num'>"+(r.periodPct==null?"—":r.periodPct.toFixed(2)+"%")+"</td>"+
       "<td>"+badge+"</td>"+
     "</tr>";
@@ -1477,15 +1482,8 @@ document.addEventListener("DOMContentLoaded", () => {
     renderAll();
   });
 
-  document.getElementById("copySummaryBtn").addEventListener("click", ()=>{
-    const text = buildSummaryText();
-    const statusEl = document.getElementById("copySummaryStatus");
-    const showCopied = () => { statusEl.textContent = "Copied!"; setTimeout(()=>{ statusEl.textContent=""; }, 2000); };
-    if (navigator.clipboard && navigator.clipboard.writeText){
-      navigator.clipboard.writeText(text).then(showCopied).catch(()=>{ copyViaTextarea(text); showCopied(); });
-    } else {
-      copyViaTextarea(text); showCopied();
-    }
+  document.getElementById("emailSummaryBtn").addEventListener("click", ()=>{
+    window.location.href = buildMailtoHref();
   });
 
   const saved = loadState();
