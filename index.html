@@ -562,16 +562,16 @@ function renderChart(container, series, opts){
     if (s.dashed) path.setAttribute("stroke-dasharray","6,4");
     svg.appendChild(path);
 
-    if (s.pointsRender!==false){
-      pts.forEach(p=>{
-        const cx = xScale(p.i), cy = yScale(p.value);
+    pts.forEach(p=>{
+      const cx = xScale(p.i), cy = yScale(p.value);
+      if (s.pointsRender!==false){
         const circle = document.createElementNS(svgNS,"circle");
         circle.setAttribute("cx",cx); circle.setAttribute("cy",cy); circle.setAttribute("r","3.5");
         circle.setAttribute("fill", s.color);
         svg.appendChild(circle);
-        hitPoints.push({x:cx,y:cy,label:labels[p.i], value:p.value, series:s.name});
-      });
-    }
+      }
+      hitPoints.push({x:cx,y:cy,label:labels[p.i], value:p.value, series:s.name});
+    });
   });
 
   container.appendChild(svg);
