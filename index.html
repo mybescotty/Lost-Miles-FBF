@@ -56,6 +56,13 @@ select.fy-select { padding:5px 8px; border-radius:5px; border:1px solid var(--bo
 .warning-banner .warning-list { margin-top:6px; }
 .wo-table tfoot td { font-weight:600; border-top:2px solid var(--border); border-bottom:none; }
 
+.settings-panel { background: var(--bg-panel); border:1px solid var(--border); border-left:4px solid var(--accent); padding:8px 12px; font-size:12px; border-radius:4px; margin-bottom:14px; }
+.settings-panel summary { cursor:pointer; font-weight:600; color:var(--text-primary); }
+.settings-panel .postcode-grid { display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; }
+.postcode-row { display:flex; flex-direction:column; gap:2px; font-size:11px; color:var(--text-secondary); }
+.postcode-row input { padding:4px 6px; border-radius:4px; border:1px solid var(--border); font-size:12px; width:110px; }
+.weather-note { font-size:11px; color:var(--text-secondary); margin-top:4px; }
+
 .stat-tiles { display:flex; gap:12px; margin-bottom:18px; flex-wrap:wrap; }
 .stat-tile { background:var(--bg-panel); border:1px solid var(--border); border-radius:8px; padding:10px 16px; min-width:140px; }
 .stat-tile .label { font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.03em; }
@@ -129,6 +136,13 @@ select.fy-select { padding:5px 8px; border-radius:5px; border:1px solid var(--bo
       <select class="fy-select" id="weekSelect" style="display:none"></select>
     </div>
 
+    <details class="settings-panel">
+      <summary>⚙ Depot postcodes (for weather) — click to configure</summary>
+      <div class="postcode-grid" id="postcodeInputs"></div>
+      <button class="upload-btn" id="savePostcodesBtn" style="margin-top:10px;">Save Postcodes</button>
+      <span id="postcodeStatus" style="font-size:11px;opacity:0.7;margin-left:8px"></span>
+    </details>
+
     <div class="stat-tiles" id="statTiles"></div>
 
     <div class="panel chart-wrap">
@@ -162,6 +176,24 @@ break;case"<bookViews":;case"<bookViews>":;case"</bookViews>":break;case"<workbo
 
 // ---------- CONFIG ----------
 const DEPOTS = ["Bradford","Bramley","Halifax","Huddersfield","Hunslet Park","Doncaster","Sheffield","Rochdale","Ravenhill","Ammerford","Haverfordwest","Port Talbot","Bridgend"];
+
+// Default postcodes for the weather lookup (rainfall/max temp) — editable per depot in the
+// "Depot postcodes" panel; anything saved there overrides these, so this is just the starting point.
+const DEFAULT_POSTCODES = {
+  "Bradford": "BD4 8SP",
+  "Bramley": "LS13 4LD",
+  "Halifax": "HX1 2YZ",
+  "Huddersfield": "HD2 1AG",
+  "Hunslet Park": "LS10 1PL",
+  "Doncaster": "DN2 6AZ",
+  "Sheffield": "S2 3GA",
+  "Rochdale": "OL11 4EU",
+  "Ravenhill": "SA1 3AR",
+  "Ammerford": "SA18 3QD",
+  "Haverfordwest": "SA62 4BN",
+  "Port Talbot": "SA12 7DP",
+  "Bridgend": "CF32 9SZ"
+};
 const ALL_DEPOTS_KEY = "All Depots";
 const PERIOD_PATTERN = [4,4,5,4,4,5,4,4,5,4,4,5]; // weeks per period, 12 periods, 52 weeks/FY
 const STORAGE_KEY = "lostMilesTracker.v1";
@@ -485,12 +517,161 @@ function loadState(){
   } catch(e){ return null; }
 }
 
+const POSTCODE_STORAGE_KEY = "lostMilesTracker.postcodes.v1";
+function savePostcodes(postcodes){
+  try { localStorage.setItem(POSTCODE_STORAGE_KEY, JSON.stringify(postcodes)); } catch(e){ /* ignore - session still usable */ }
+}
+function loadPostcodes(){
+  let saved = {};
+  try { const raw = localStorage.getItem(POSTCODE_STORAGE_KEY); saved = raw ? JSON.parse(raw) : {}; }
+  catch(e){ saved = {}; }
+  return Object.assign({}, DEFAULT_POSTCODES, saved);
+}
+
+// ---------- WEATHER (rainfall + max temp, via postcodes.io + Open-Meteo — both free, no API key) ----------
+const GEOCODE_CACHE_KEY = "lostMilesTracker.geocodeCache.v1";
+const WEATHER_CACHE_KEY = "lostMilesTracker.weatherCache.v1";
+
+function loadJSONCache(key){
+  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : {}; } catch(e){ return {}; }
+}
+function saveJSONCache(key, obj){
+  try { localStorage.setItem(key, JSON.stringify(obj)); } catch(e){ /* quota exceeded - just won't persist across reloads */ }
+}
+
+let geocodeCache = loadJSONCache(GEOCODE_CACHE_KEY);  // normalized postcode -> {lat,lon}
+let weatherCache = loadJSONCache(WEATHER_CACHE_KEY);  // "lat,lon|start|end" -> {dateKey: {rainfall,maxTemp}}
+const resolvedWeather = {};       // "depot|fyLabel" -> {dateKey: {rainfall,maxTemp}}, once fetched this session
+const weatherFetchesInFlight = new Set();
+const weatherErrors = {};         // depot -> message
+
+function normalizePostcode(pc){ return String(pc||"").trim().toUpperCase().replace(/\s+/g,""); }
+
+async function geocodePostcode(postcode){
+  const key = normalizePostcode(postcode);
+  if (!key) throw new Error("No postcode set");
+  if (geocodeCache[key]) return geocodeCache[key];
+  const res = await fetch("https://api.postcodes.io/postcodes/"+encodeURIComponent(key));
+  if (!res.ok) throw new Error("Postcode not found");
+  const json = await res.json();
+  if (!json.result) throw new Error("Postcode not found");
+  const coords = { lat: json.result.latitude, lon: json.result.longitude };
+  geocodeCache[key] = coords;
+  saveJSONCache(GEOCODE_CACHE_KEY, geocodeCache);
+  return coords;
+}
+
+async function fetchWeatherRange(lat, lon, startDateKey, endDateKey){
+  const cacheKey = lat.toFixed(2)+","+lon.toFixed(2)+"|"+startDateKey+"|"+endDateKey;
+  if (weatherCache[cacheKey]) return weatherCache[cacheKey];
+  const url = "https://archive-api.open-meteo.com/v1/archive?latitude="+lat+"&longitude="+lon+
+    "&start_date="+startDateKey+"&end_date="+endDateKey+
+    "&daily=precipitation_sum,temperature_2m_max&timezone=Europe%2FLondon";
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Weather lookup failed");
+  const json = await res.json();
+  const byDate = {};
+  const times = (json.daily && json.daily.time) || [];
+  times.forEach((t,i)=>{ byDate[t] = { rainfall: json.daily.precipitation_sum[i], maxTemp: json.daily.temperature_2m_max[i] }; });
+  weatherCache[cacheKey] = byDate;
+  saveJSONCache(WEATHER_CACHE_KEY, weatherCache);
+  return byDate;
+}
+
+function getWeatherIfReady(depot, fyLabel){
+  return resolvedWeather[depot+"|"+fyLabel] || null;
+}
+
+// Kicks off a geocode+fetch for a depot/FY if not already resolved or in flight; re-renders
+// when it lands (only if the user is still looking at that same depot/FY by then).
+function ensureWeather(depot, fyLabel){
+  if (depot===ALL_DEPOTS_KEY) return; // no single location for the combined view
+  const scopeKey = depot+"|"+fyLabel;
+  if (resolvedWeather[scopeKey] || weatherFetchesInFlight.has(scopeKey)) return;
+  const postcode = state.depotPostcodes[depot];
+  if (!postcode) return;
+
+  const fy = CONFIG.fy.find(f=>f.label===fyLabel);
+  if (!fy) return;
+  const fyEnd = addDays(fy.start, 52*7 - 1);
+  const yesterday = addDays(todayMidnight(), -1);
+  const endDate = fyEnd < yesterday ? fyEnd : yesterday;
+  if (endDate < fy.start) return; // whole FY is still in the future - nothing to fetch yet
+
+  weatherFetchesInFlight.add(scopeKey);
+  delete weatherErrors[depot];
+
+  geocodePostcode(postcode)
+    .then(coords => fetchWeatherRange(coords.lat, coords.lon, dateKey(fy.start), dateKey(endDate)))
+    .then(byDate => {
+      resolvedWeather[scopeKey] = byDate;
+      weatherFetchesInFlight.delete(scopeKey);
+      if (state.selectedDepot===depot && state.fyLabel===fyLabel) renderAll();
+    })
+    .catch(err => {
+      weatherFetchesInFlight.delete(scopeKey);
+      weatherErrors[depot] = err.message || "Weather lookup failed";
+      if (state.selectedDepot===depot && state.fyLabel===fyLabel) renderAll();
+    });
+}
+
+function aggregateWeather(weatherMap, startDate, endDate){
+  let rainfallSum=0, tempSum=0, tempCount=0, any=false;
+  let d = new Date(startDate);
+  while (d <= endDate){
+    const w = weatherMap[dateKey(d)];
+    if (w){
+      any = true;
+      if (w.rainfall!=null) rainfallSum += w.rainfall;
+      if (w.maxTemp!=null){ tempSum += w.maxTemp; tempCount++; }
+    }
+    d = addDays(d,1);
+  }
+  if (!any) return null;
+  return { rainfall: rainfallSum, maxTemp: tempCount>0 ? tempSum/tempCount : null };
+}
+
+// Builds the Rainfall/Max Temp chart series for a list of {i,start,end} buckets (days, weeks or
+// periods) — shared by the Daily, Weekly and Period charts so aggregation logic lives in one place.
+function buildWeatherSeries(depot, fyLabel, buckets){
+  if (depot===ALL_DEPOTS_KEY) return [];
+  if (!state.depotPostcodes[depot]) return [];
+  ensureWeather(depot, fyLabel);
+  const weatherMap = getWeatherIfReady(depot, fyLabel);
+  if (!weatherMap) return [];
+
+  const rainfallPoints = [], tempPoints = [];
+  buckets.forEach(b=>{
+    const agg = aggregateWeather(weatherMap, b.start, b.end);
+    rainfallPoints.push({ i:b.i, value: agg ? agg.rainfall : null });
+    tempPoints.push({ i:b.i, value: (agg && agg.maxTemp!=null) ? agg.maxTemp : null });
+  });
+  return [
+    { name:"Rainfall", type:"bar", color:"#3498db", points:rainfallPoints, axis:"secondary", unit:"mm" },
+    { name:"Max Temp", type:"line", color:"#e67e22", dashed:false, points:tempPoints, axis:"secondary", unit:"°C" }
+  ];
+}
+
+function weatherStatusNote(depot, fyLabel){
+  if (depot===ALL_DEPOTS_KEY || !state.depotPostcodes[depot]) return "";
+  if (weatherFetchesInFlight.has(depot+"|"+fyLabel)) return "Fetching weather…";
+  if (weatherErrors[depot]) return "Weather unavailable — "+weatherErrors[depot];
+  return "";
+}
+
 // ---------- CHART ----------
+function formatSeriesValue(value, unit){
+  if (unit==="mm") return value.toFixed(1)+"mm";
+  if (unit==="°C") return value.toFixed(1)+"°C";
+  return value.toFixed(2)+"%";
+}
+
 function renderChart(container, series, opts){
   container.innerHTML = "";
   const width = container.clientWidth || 700;
   const height = 260;
-  const padding = { top:16, right:24, bottom:28, left:48 };
+  const hasSecondary = series.some(s=>s.axis==="secondary");
+  const padding = { top:16, right: hasSecondary?52:24, bottom:28, left:48 };
   const svgNS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(svgNS,"svg");
   svg.setAttribute("viewBox", "0 0 "+width+" "+height);
@@ -499,12 +680,34 @@ function renderChart(container, series, opts){
 
   const labels = opts.labels;
   const n = labels.length;
-  const allValues = series.flatMap(s => (s.points||[]).map(p=>p.value).filter(v=>v!=null));
-  let maxV = Math.max(opts.target*1.6, ...allValues, 0.01) * 1.15;
+  const primaryValues = series.filter(s=>s.axis!=="secondary").flatMap(s => (s.points||[]).map(p=>p.value).filter(v=>v!=null));
+  let maxV = Math.max(opts.target*1.6, ...primaryValues, 0.01) * 1.15;
   const minV = 0;
 
   const xScale = i => padding.left + (n<=1?0:(i/(n-1))*(width-padding.left-padding.right));
   const yScale = v => height-padding.bottom - ((v-minV)/(maxV-minV))*(height-padding.top-padding.bottom);
+
+  // Rainfall (bars) and Max Temp (line) share the right-hand pixel space but each keep their
+  // own independent value domain — they're different units, not meant to share one scale.
+  const rainfallSeries = series.find(s=>s.axis==="secondary" && s.unit==="mm");
+  const tempSeries = series.find(s=>s.axis==="secondary" && s.unit==="°C");
+  let maxRainfall = 0, yScaleRainfall = null;
+  if (rainfallSeries){
+    const vals = rainfallSeries.points.map(p=>p.value).filter(v=>v!=null);
+    maxRainfall = Math.max(...vals, 1) * 1.3;
+    yScaleRainfall = v => height-padding.bottom - (v/maxRainfall)*(height-padding.top-padding.bottom);
+  }
+  let minTemp=0, maxTemp=1, yScaleTemp = null;
+  if (tempSeries){
+    const vals = tempSeries.points.map(p=>p.value).filter(v=>v!=null);
+    minTemp = Math.min(0, ...vals);
+    maxTemp = Math.max(...vals, 1) * 1.15;
+    yScaleTemp = v => height-padding.bottom - ((v-minTemp)/(maxTemp-minTemp))*(height-padding.top-padding.bottom);
+  }
+  function scaleForSeries(s){
+    if (s.axis==="secondary") return s.unit==="mm" ? yScaleRainfall : yScaleTemp;
+    return yScale;
+  }
 
   const axisG = document.createElementNS(svgNS,"g");
   [0,0.25,0.5,0.75,1].forEach(f=>{
@@ -521,6 +724,17 @@ function renderChart(container, series, opts){
     gridLine.setAttribute("stroke","#f0f0f5");
     axisG.appendChild(gridLine);
   });
+  if (rainfallSeries){
+    [0,0.5,1].forEach(f=>{
+      const v = maxRainfall*f;
+      const y = yScaleRainfall(v);
+      const tick = document.createElementNS(svgNS,"text");
+      tick.setAttribute("x", width-padding.right+6); tick.setAttribute("y", y+3);
+      tick.setAttribute("text-anchor","start"); tick.setAttribute("font-size","10"); tick.setAttribute("fill","#3498db");
+      tick.textContent = v.toFixed(0)+"mm";
+      axisG.appendChild(tick);
+    });
+  }
   const xAxisLine = document.createElementNS(svgNS,"line");
   xAxisLine.setAttribute("x1",padding.left); xAxisLine.setAttribute("x2",width-padding.right);
   xAxisLine.setAttribute("y1",height-padding.bottom); xAxisLine.setAttribute("y2",height-padding.bottom);
@@ -538,7 +752,11 @@ function renderChart(container, series, opts){
   });
   svg.appendChild(axisG);
 
-  const hitPoints = [];
+  const byIndex = {}; // column index -> [{series,value,unit}], for the grouped tooltip
+  function addHit(i, s, value){
+    if (!byIndex[i]) byIndex[i] = [];
+    byIndex[i].push({ series:s.name, value, unit:s.unit });
+  }
 
   series.forEach(s => {
     if (s.type==="flat"){
@@ -549,11 +767,33 @@ function renderChart(container, series, opts){
       line.setAttribute("stroke", s.color); line.setAttribute("stroke-width","2");
       if (s.dashed) line.setAttribute("stroke-dasharray","6,4");
       svg.appendChild(line);
+      for (let i=0;i<n;i++) addHit(i, s, s.value);
       return;
     }
+
+    const scaleFn = scaleForSeries(s);
     const pts = s.points.filter(p=>p.value!=null);
     if (pts.length===0) return;
-    const d = pts.map((p,idx)=> (idx===0?"M":"L")+xScale(p.i)+","+yScale(p.value)).join(" ");
+
+    if (s.type==="bar"){
+      const barWidth = n>1 ? (width-padding.left-padding.right)/n*0.55 : 24;
+      const yBase = scaleFn(0);
+      pts.forEach(p=>{
+        const cx = xScale(p.i), yTop = scaleFn(p.value);
+        const rect = document.createElementNS(svgNS,"rect");
+        rect.setAttribute("x", cx-barWidth/2);
+        rect.setAttribute("y", Math.min(yTop,yBase));
+        rect.setAttribute("width", barWidth);
+        rect.setAttribute("height", Math.max(1,Math.abs(yBase-yTop)));
+        rect.setAttribute("fill", s.color);
+        rect.setAttribute("opacity","0.35");
+        svg.appendChild(rect);
+        addHit(p.i, s, p.value);
+      });
+      return;
+    }
+
+    const d = pts.map((p,idx)=> (idx===0?"M":"L")+xScale(p.i)+","+scaleFn(p.value)).join(" ");
     const path = document.createElementNS(svgNS,"path");
     path.setAttribute("d", d);
     path.setAttribute("fill","none");
@@ -563,14 +803,14 @@ function renderChart(container, series, opts){
     svg.appendChild(path);
 
     pts.forEach(p=>{
-      const cx = xScale(p.i), cy = yScale(p.value);
+      const cx = xScale(p.i), cy = scaleFn(p.value);
       if (s.pointsRender!==false){
         const circle = document.createElementNS(svgNS,"circle");
         circle.setAttribute("cx",cx); circle.setAttribute("cy",cy); circle.setAttribute("r","3.5");
         circle.setAttribute("fill", s.color);
         svg.appendChild(circle);
       }
-      hitPoints.push({x:cx,y:cy,label:labels[p.i], value:p.value, series:s.name});
+      addHit(p.i, s, p.value);
     });
   });
 
@@ -578,18 +818,22 @@ function renderChart(container, series, opts){
 
   const tooltip = opts.tooltip;
   svg.addEventListener("mousemove", e => {
-    if (!hitPoints.length || !tooltip) return;
+    if (!tooltip) return;
     const rect = svg.getBoundingClientRect();
     const scaleX = width/rect.width;
     const mx = (e.clientX-rect.left)*scaleX;
-    let nearest=null, best=Infinity;
-    hitPoints.forEach(p=>{ const dist=Math.abs(p.x-mx); if(dist<best){best=dist; nearest=p;} });
-    if (nearest){
-      tooltip.style.opacity="1";
-      tooltip.style.left = Math.min(nearest.x, width-130)+"px";
-      tooltip.style.top = Math.max(nearest.y-36,0)+"px";
-      tooltip.textContent = nearest.series+" · "+nearest.label+": "+nearest.value.toFixed(2)+"%";
+    let nearestI=null, best=Infinity;
+    for (let i=0;i<n;i++){
+      const dist = Math.abs(xScale(i)-mx);
+      if (dist<best){ best=dist; nearestI=i; }
     }
+    const entries = (nearestI!=null && byIndex[nearestI]) || [];
+    if (!entries.length){ tooltip.style.opacity="0"; return; }
+    tooltip.style.opacity="1";
+    tooltip.style.left = Math.min(xScale(nearestI), width-160)+"px";
+    tooltip.style.top = "8px";
+    tooltip.innerHTML = "<div style='font-weight:600;margin-bottom:2px'>"+labels[nearestI]+"</div>"+
+      entries.map(en=>en.series+": "+formatSeriesValue(en.value, en.unit)).join("<br>");
   });
   svg.addEventListener("mouseleave", ()=>{ if(tooltip) tooltip.style.opacity="0"; });
 }
@@ -602,6 +846,7 @@ let state = {
   view: "weekly",
   fyLabel: CONFIG.fy[0].label,
   selectedWeekKey: null,
+  depotPostcodes: loadPostcodes(),
 };
 let weeklyRollups = null, periodRollups = null, dayLookup = null;
 
@@ -812,6 +1057,7 @@ function renderDayChart(){
   const today = todayMidnight();
   const labels = [];
   const points = [];
+  const dayBuckets = [];
   let d = new Date(week.weekStart);
   for (let i=0;i<7;i++){
     const key = dateKey(d);
@@ -819,6 +1065,7 @@ function renderDayChart(){
     const dayRow = future ? null : getDayRow(depot, key);
     labels.push(DAY_NAMES[i]);
     points.push({ i, value: (future || !dayRow) ? null : dayRow.lostMilesPct });
+    dayBuckets.push({ i, start:new Date(d), end:new Date(d) });
     d = addDays(d,1);
   }
 
@@ -844,11 +1091,17 @@ function renderDayChart(){
       : "Target no longer reachable this week — minimum needed is 0%.";
   }
 
+  const weatherSeries = buildWeatherSeries(depot, state.fyLabel, dayBuckets);
+  series.push(...weatherSeries);
+  const weatherNote = weatherStatusNote(depot, state.fyLabel);
+
   document.getElementById("chartLegend").innerHTML =
     "<span><span class='legend-swatch' style='border-color:#2D2A6E'></span>Actual</span>"+
     "<span><span class='legend-swatch' style='border-color:#27ae60;border-top-style:dashed'></span>Target ("+state.target.toFixed(2)+"%)</span>"+
     (runRate?"<span><span class='legend-swatch' style='border-color:#E5007D;border-top-style:dashed'></span>Required run-rate</span>":"")+
-    (runRateNote?"<div style='width:100%;margin-top:4px'>"+runRateNote+"</div>":"");
+    (weatherSeries.length?"<span><span class='legend-swatch' style='border-color:#3498db'></span>Rainfall (mm)</span><span><span class='legend-swatch' style='border-color:#e67e22'></span>Max Temp (°C)</span>":"")+
+    (runRateNote?"<div style='width:100%;margin-top:4px'>"+runRateNote+"</div>":"")+
+    (weatherNote?"<div class='weather-note'>"+weatherNote+"</div>":"");
 
   renderChart(document.getElementById("chartContainer"), series, { labels, target: state.target, tooltip: document.getElementById("tooltipBox") });
 }
@@ -861,13 +1114,14 @@ function renderChartPanel(){
   const isWeekly = state.view==="weekly";
   const weeksInFY = CALENDAR.filter(w=>w.fyLabel===state.fyLabel);
 
-  let labels, points, scopeWeeksForRunRate, scopeLabel;
+  let labels, points, scopeWeeksForRunRate, scopeLabel, buckets;
   if (isWeekly){
     labels = weeksInFY.map(w=>"W"+w.weekNum);
     points = weeksInFY.map((w,i)=>({ i, value: w.status==="future"?null:weeklyRollups[depot][w.key].lostPct }));
     const currentWeek = weeksInFY.find(w=>w.status==="in-progress") || [...weeksInFY].reverse().find(w=>w.status==="complete") || weeksInFY[0];
     scopeWeeksForRunRate = weeksInFY.filter(w=>w.periodNum===currentWeek.periodNum);
     scopeLabel = "period";
+    buckets = weeksInFY.map((w,i)=>({ i, start:w.weekStart, end:w.weekEnd }));
   } else {
     const periodNums = [...new Set(weeksInFY.map(w=>w.periodNum))];
     labels = periodNums.map(p=>"P"+p);
@@ -877,6 +1131,10 @@ function renderChartPanel(){
     });
     scopeWeeksForRunRate = weeksInFY;
     scopeLabel = "year";
+    buckets = periodNums.map((p,i)=>{
+      const weeksInP = weeksInFY.filter(w=>w.periodNum===p);
+      return { i, start:weeksInP[0].weekStart, end:weeksInP[weeksInP.length-1].weekEnd };
+    });
   }
 
   const series = [
@@ -901,11 +1159,17 @@ function renderChartPanel(){
       : "Target no longer reachable this "+scopeLabel+" — minimum needed is 0%.";
   }
 
+  const weatherSeries = buildWeatherSeries(depot, state.fyLabel, buckets);
+  series.push(...weatherSeries);
+  const weatherNote = weatherStatusNote(depot, state.fyLabel);
+
   document.getElementById("chartLegend").innerHTML =
     "<span><span class='legend-swatch' style='border-color:#2D2A6E'></span>Actual</span>"+
     "<span><span class='legend-swatch' style='border-color:#27ae60;border-top-style:dashed'></span>Target ("+state.target.toFixed(2)+"%)</span>"+
     (runRate?"<span><span class='legend-swatch' style='border-color:#E5007D;border-top-style:dashed'></span>Required run-rate</span>":"")+
-    (runRateNote?"<div style='width:100%;margin-top:4px'>"+runRateNote+"</div>":"");
+    (weatherSeries.length?"<span><span class='legend-swatch' style='border-color:#3498db'></span>Rainfall (mm)</span><span><span class='legend-swatch' style='border-color:#e67e22'></span>Max Temp (°C)</span>":"")+
+    (runRateNote?"<div style='width:100%;margin-top:4px'>"+runRateNote+"</div>":"")+
+    (weatherNote?"<div class='weather-note'>"+weatherNote+"</div>":"");
 
   renderChart(document.getElementById("chartContainer"), series, { labels, target: state.target, tooltip: document.getElementById("tooltipBox") });
 }
@@ -950,6 +1214,22 @@ document.addEventListener("DOMContentLoaded", () => {
   targetInput.addEventListener("change", ()=>{
     const v = parseFloat(targetInput.value);
     if (!isNaN(v) && v>=0){ state.target=v; saveState(state.rawData, state.target); renderAll(); }
+  });
+
+  const postcodeInputsEl = document.getElementById("postcodeInputs");
+  postcodeInputsEl.innerHTML = DEPOTS.map(d=>
+    "<div class='postcode-row'><label>"+escapeHtml(d)+"</label>"+
+    "<input type='text' data-depot=\""+escapeHtml(d)+"\" value=\""+escapeHtml(state.depotPostcodes[d]||"")+"\"></div>"
+  ).join("");
+  document.getElementById("savePostcodesBtn").addEventListener("click", ()=>{
+    const updated = {};
+    postcodeInputsEl.querySelectorAll("input").forEach(inp=>{ updated[inp.dataset.depot] = inp.value.trim(); });
+    state.depotPostcodes = updated;
+    savePostcodes(updated);
+    Object.keys(resolvedWeather).forEach(k=>delete resolvedWeather[k]);
+    Object.keys(weatherErrors).forEach(k=>delete weatherErrors[k]);
+    document.getElementById("postcodeStatus").textContent = "Saved.";
+    renderAll();
   });
 
   document.getElementById("uploadBtn").addEventListener("click", ()=> document.getElementById("fileInput").click());
