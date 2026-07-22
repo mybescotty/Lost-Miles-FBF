@@ -34,8 +34,6 @@ header .tagline { font-size:10px; opacity:0.55; letter-spacing:0.05em; margin-to
 .action-btn { background:#27ae60; color:#fff; border:none; border-radius:5px; padding:4px 12px; font-size:12px; cursor:pointer; }
 .action-btn:hover { background:#219a52; }
 
-.target-input-wrap { display:flex; align-items:center; gap:6px; font-size:12px; }
-.target-input-wrap input { width:60px; padding:4px 6px; border-radius:4px; border:1px solid var(--border); font-size:12px; }
 
 .layout { display:flex; min-height: calc(100vh - 56px); }
 .sidebar { width:190px; background:var(--bg-panel); border-right:1px solid var(--border); padding:14px 0; flex-shrink:0; }
@@ -107,10 +105,6 @@ select.fy-select { padding:5px 8px; border-radius:5px; border:1px solid var(--bo
     <div class="tagline">Designed by First Bus Franchise · Engineering</div>
   </div>
   <div class="header-right">
-    <div class="target-input-wrap">
-      <label for="targetInput">Target %</label>
-      <input type="number" id="targetInput" step="0.01" min="0">
-    </div>
     <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none">
     <button class="upload-btn" id="uploadBtn">Upload Workbook</button>
     <span id="uploadStatus" style="font-size:11px;opacity:0.75"></span>
@@ -189,7 +183,7 @@ break;case"<bookViews":;case"<bookViews>":;case"</bookViews>":break;case"<workbo
 'use strict';
 
 // ---------- CONFIG ----------
-const DEPOTS = ["Bradford","Bramley","Halifax","Huddersfield","Hunslet Park","Doncaster","Sheffield","Rochdale","Ravenhill","Ammerford","Haverfordwest","Port Talbot","Bridgend"];
+const DEPOTS = ["Bradford","Bramley","Halifax","Huddersfield","Hunslet Park","Doncaster","Sheffield","Rochdale","Ravenhill","Carmarthen","Ammerford","Haverfordwest","Port Talbot","Bridgend"];
 
 // Default postcodes for the weather lookup (rainfall/max temp) — editable per depot in the
 // "Depot postcodes" panel; anything saved there overrides these, so this is just the starting point.
@@ -203,11 +197,34 @@ const DEFAULT_POSTCODES = {
   "Sheffield": "S2 3GA",
   "Rochdale": "OL11 4EU",
   "Ravenhill": "SA1 3AR",
+  "Carmarthen": "",
   "Ammerford": "SA18 3QD",
   "Haverfordwest": "SA62 4BN",
   "Port Talbot": "SA12 7DP",
   "Bridgend": "CF32 9SZ"
 };
+
+// Hardcoded per-depot lost-miles targets (%). Editable here directly — no UI for this since
+// these come from a fixed operational target sheet, not something tuned per session.
+const DEPOT_TARGETS = {
+  "Bradford": 0.3,
+  "Bramley": 0.3,
+  "Halifax": 0.2,
+  "Huddersfield": 0.2,
+  "Hunslet Park": 0.5,
+  "Doncaster": 0.2,
+  "Sheffield": 0.8,
+  "Rochdale": 0.1,
+  "Ravenhill": 0.5,
+  "Carmarthen": 0.2,
+  "Ammerford": 0.2,
+  "Haverfordwest": 0.2,
+  "Port Talbot": 0.25,
+  "Bridgend": 0.25
+};
+function getDepotTarget(depot){
+  return DEPOT_TARGETS[depot] != null ? DEPOT_TARGETS[depot] : CONFIG.target;
+}
 const ALL_DEPOTS_KEY = "All Depots";
 const PERIOD_PATTERN = [4,4,5,4,4,5,4,4,5,4,4,5]; // weeks per period, 12 periods, 52 weeks/FY
 const STORAGE_KEY = "lostMilesTracker.v1";
@@ -514,9 +531,9 @@ function computeDayRunRate(depot, week, target){
 }
 
 // ---------- PERSISTENCE ----------
-function saveState(rawData, target){
+function saveState(rawData){
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ rawData, target, savedAt: new Date().toISOString() }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ rawData, savedAt: new Date().toISOString() }));
   } catch(e){ /* storage full/unavailable - ignore, session still works */ }
 }
 function loadState(){
@@ -917,7 +934,6 @@ function renderChart(container, series, opts){
 // ---------- STATE ----------
 let state = {
   rawData: null,
-  target: CONFIG.target,
   selectedDepot: ALL_DEPOTS_KEY,
   view: "weekly",
   fyLabel: CONFIG.fy[0].label,
@@ -941,10 +957,10 @@ function defaultWeekKeyForFY(fyLabel){
   return week ? week.key : null;
 }
 
-function ragClass(pct){
-  if (pct==null) return "";
-  if (pct<=state.target) return "green";
-  if (pct<=state.target*CONFIG.ragAmberMultiplier) return "amber";
+function ragClass(pct, target){
+  if (pct==null || target==null) return "";
+  if (pct<=target) return "green";
+  if (pct<=target*CONFIG.ragAmberMultiplier) return "amber";
   return "red";
 }
 
@@ -1018,13 +1034,15 @@ function getPeriodTrend(depot){
 function renderStatTiles(){
   const el = document.getElementById("statTiles");
   el.innerHTML = "";
-  const summary = getDepotSummary(state.selectedDepot, state.fyLabel);
+  const depot = state.selectedDepot;
+  const target = depot===ALL_DEPOTS_KEY ? null : getDepotTarget(depot);
+  const summary = getDepotSummary(depot, state.fyLabel);
 
   const tiles = [
-    { label:"Yesterday Lost %", value: summary.yesterdayPct==null?"—":summary.yesterdayPct.toFixed(2)+"%", cls: ragClass(summary.yesterdayPct) },
-    { label:"Current Week Lost %", value: summary.weekPct==null?"—":summary.weekPct.toFixed(2)+"%", cls: ragClass(summary.weekPct) },
-    { label:"Current Period Lost %", value: summary.periodPct==null?"—":summary.periodPct.toFixed(2)+"%", cls: summary.periodRoll?ragClass(summary.periodPct):"" },
-    { label:"Target", value: state.target.toFixed(2)+"%", cls:"" }
+    { label:"Yesterday Lost %", value: summary.yesterdayPct==null?"—":summary.yesterdayPct.toFixed(2)+"%", cls: ragClass(summary.yesterdayPct, target) },
+    { label:"Current Week Lost %", value: summary.weekPct==null?"—":summary.weekPct.toFixed(2)+"%", cls: ragClass(summary.weekPct, target) },
+    { label:"Current Period Lost %", value: summary.periodPct==null?"—":summary.periodPct.toFixed(2)+"%", cls: summary.periodRoll?ragClass(summary.periodPct, target):"" },
+    { label:"Target", value: target==null?"—":target.toFixed(2)+"%", cls:"" }
   ];
   tiles.forEach(t=>{
     const div = document.createElement("div");
@@ -1036,7 +1054,7 @@ function renderStatTiles(){
 
 // ---------- RENDER: LEADERBOARD (All Depots only) ----------
 function getLeaderboardRows(fyLabel){
-  return DEPOTS.map(depot => ({ depot, ...getDepotSummary(depot, fyLabel) }))
+  return DEPOTS.map(depot => ({ depot, target: getDepotTarget(depot), ...getDepotSummary(depot, fyLabel) }))
     .sort((a,b) => {
       if (a.periodPct==null && b.periodPct==null) return 0;
       if (a.periodPct==null) return 1;
@@ -1049,22 +1067,22 @@ function buildSummaryText(){
   const lines = [];
   if (state.selectedDepot === ALL_DEPOTS_KEY){
     lines.push("Lost Miles Tracker — All Depots Leaderboard ("+state.fyLabel+")");
-    lines.push("Target: "+state.target.toFixed(2)+"%");
     lines.push("");
     getLeaderboardRows(state.fyLabel).forEach((r,idx)=>{
-      lines.push((idx+1)+". "+r.depot+" — Current Week "+(r.weekPct==null?"—":r.weekPct.toFixed(2)+"%")+
+      lines.push((idx+1)+". "+r.depot+" — Target "+r.target.toFixed(2)+"% · Current Week "+(r.weekPct==null?"—":r.weekPct.toFixed(2)+"%")+
         " · Current Period "+(r.periodPct==null?"—":r.periodPct.toFixed(2)+"%"));
     });
   } else {
     const depot = state.selectedDepot;
+    const target = getDepotTarget(depot);
     const summary = getDepotSummary(depot, state.fyLabel);
     lines.push("Lost Miles Tracker — "+depot+" ("+state.fyLabel+")");
     lines.push("Current Period: "+(summary.currentWeek ? summary.currentWeek.periodLabel : "—"));
-    lines.push("Target: "+state.target.toFixed(2)+"%");
+    lines.push("Target: "+target.toFixed(2)+"%");
     lines.push("Yesterday Lost %: "+(summary.yesterdayPct==null?"—":summary.yesterdayPct.toFixed(2)+"%"));
     lines.push("Current Week Lost %: "+(summary.weekPct==null?"—":summary.weekPct.toFixed(2)+"%"));
     if (summary.periodPct!=null){
-      const variance = summary.periodPct - state.target;
+      const variance = summary.periodPct - target;
       lines.push("Current Period Lost %: "+summary.periodPct.toFixed(2)+"% (variance "+(variance>=0?"+":"")+variance.toFixed(2)+"pp)");
     } else {
       lines.push("Current Period Lost %: —");
@@ -1097,15 +1115,17 @@ function renderLeaderboard(){
 
   const rows = getLeaderboardRows(state.fyLabel);
   let html = "<table class='wo-table'><thead><tr>"+
-    "<th>Rank</th><th>Depot</th><th>Current Week Lost %</th><th>Current Period Lost %</th><th>Status</th>"+
+    "<th>Rank</th><th>Depot</th><th>Target %</th><th>Current Week Lost %</th><th>Current Period Lost %</th><th>Status</th>"+
     "</tr></thead><tbody>";
   rows.forEach((r,idx)=>{
-    const rowClass = r.periodPct==null ? "" : "row-"+ragClass(r.periodPct);
+    const rag = ragClass(r.periodPct, r.target);
+    const rowClass = r.periodPct==null ? "" : "row-"+rag;
     const badge = r.periodPct==null ? "<span class='badge-navy'>No data</span>"
-      : "<span class='badge-"+ragClass(r.periodPct)+"'>"+ragClass(r.periodPct).toUpperCase()+"</span>";
+      : "<span class='badge-"+rag+"'>"+rag.toUpperCase()+"</span>";
     html += "<tr class='"+rowClass+"' style='cursor:pointer' data-depot=\""+escapeHtml(r.depot)+"\">"+
       "<td>"+(idx+1)+"</td>"+
       "<td>"+escapeHtml(r.depot)+"</td>"+
+      "<td class='num'>"+r.target.toFixed(2)+"%</td>"+
       "<td class='num'>"+(r.weekPct==null?"—":r.weekPct.toFixed(2)+"%")+"</td>"+
       "<td class='num'>"+(r.periodPct==null?"—":r.periodPct.toFixed(2)+"%")+"</td>"+
       "<td>"+badge+"</td>"+
@@ -1127,6 +1147,7 @@ function renderTable(){
   const container = document.getElementById("tableContainer");
   const titleEl = document.getElementById("tableTitle");
   const depot = state.selectedDepot;
+  const target = depot===ALL_DEPOTS_KEY ? null : getDepotTarget(depot);
   const isWeekly = state.view==="weekly";
   titleEl.textContent = (isWeekly?"Weekly":"Period")+" Breakdown — "+depot+" ("+state.fyLabel+")";
 
@@ -1156,9 +1177,9 @@ function renderTable(){
     const future = row.status==="future";
     const noData = !future && r.scheduledSum===0 && r.daysIncluded===0;
     const blank = future || noData;
-    const rowClass = future ? "row-future" : noData ? "" : (r.lostPct==null?"":"row-"+ragClass(r.lostPct));
+    const rowClass = future ? "row-future" : noData ? "" : (r.lostPct==null?"":"row-"+ragClass(r.lostPct, target));
     const lostStr = blank ? "—" : (r.lostPct==null ? "—" : r.lostPct.toFixed(2)+"%");
-    const variance = (blank || r.lostPct==null) ? "—" : (r.lostPct-state.target>=0?"+":"")+(r.lostPct-state.target).toFixed(2)+"pp";
+    const variance = (blank || r.lostPct==null || target==null) ? "—" : (r.lostPct-target>=0?"+":"")+(r.lostPct-target).toFixed(2)+"pp";
     const statusBadge = future ? "<span class='badge-navy'>Upcoming</span>"
       : noData ? "<span class='badge-navy'>No data</span>"
       : row.status==="in-progress" ? "<span class='badge-amber'>In progress</span>"
@@ -1169,7 +1190,7 @@ function renderTable(){
       "<td class='num'>"+(blank?"—":Math.round(r.scheduledSum).toLocaleString())+"</td>"+
       "<td class='num'>"+(blank?"—":r.droppedSum.toFixed(1))+"</td>"+
       "<td class='num'>"+lostStr+"</td>"+
-      "<td class='num'>"+state.target.toFixed(2)+"%</td>"+
+      "<td class='num'>"+(target==null?"—":target.toFixed(2)+"%")+"</td>"+
       "<td class='num'>"+variance+"</td>"+
       "<td>"+statusBadge+"</td>"+
     "</tr>";
@@ -1201,6 +1222,7 @@ function renderDayTable(){
   const container = document.getElementById("tableContainer");
   const titleEl = document.getElementById("tableTitle");
   const depot = state.selectedDepot;
+  const target = depot===ALL_DEPOTS_KEY ? null : getDepotTarget(depot);
   const week = CALENDAR.find(w=>w.key===state.selectedWeekKey);
   if (!week){ container.innerHTML=""; titleEl.textContent="Daily Breakdown"; return; }
 
@@ -1219,9 +1241,9 @@ function renderDayTable(){
     const noData = !future && (!dayRow || dayRow.lostMilesPct==null);
     const blank = future || noData;
     const lostPct = blank ? null : dayRow.lostMilesPct;
-    const rowClass = future ? "row-future" : noData ? "" : "row-"+ragClass(lostPct);
+    const rowClass = future ? "row-future" : noData ? "" : "row-"+ragClass(lostPct, target);
     const lostStr = blank ? "—" : lostPct.toFixed(2)+"%";
-    const variance = blank ? "—" : (lostPct-state.target>=0?"+":"")+(lostPct-state.target).toFixed(2)+"pp";
+    const variance = (blank || target==null) ? "—" : (lostPct-target>=0?"+":"")+(lostPct-target).toFixed(2)+"pp";
     const statusBadge = future ? "<span class='badge-navy'>Upcoming</span>"
       : noData ? "<span class='badge-navy'>No data</span>"
       : "<span class='badge-green'>Complete</span>";
@@ -1231,7 +1253,7 @@ function renderDayTable(){
       "<td class='num'>"+(blank?"—":Math.round(dayRow.scheduledMiles).toLocaleString())+"</td>"+
       "<td class='num'>"+(blank?"—":dayRow.droppedMiles.toFixed(1))+"</td>"+
       "<td class='num'>"+lostStr+"</td>"+
-      "<td class='num'>"+state.target.toFixed(2)+"%</td>"+
+      "<td class='num'>"+(target==null?"—":target.toFixed(2)+"%")+"</td>"+
       "<td class='num'>"+variance+"</td>"+
       "<td>"+statusBadge+"</td>"+
     "</tr>";
@@ -1240,13 +1262,13 @@ function renderDayTable(){
 
   const weekRoll = weeklyRollups[depot][week.key];
   const weekLostStr = weekRoll.lostPct==null ? "—" : weekRoll.lostPct.toFixed(2)+"%";
-  const weekVariance = weekRoll.lostPct==null ? "—" : (weekRoll.lostPct-state.target>=0?"+":"")+(weekRoll.lostPct-state.target).toFixed(2)+"pp";
+  const weekVariance = (weekRoll.lostPct==null || target==null) ? "—" : (weekRoll.lostPct-target>=0?"+":"")+(weekRoll.lostPct-target).toFixed(2)+"pp";
   html += "</tbody><tfoot><tr>"+
     "<td colspan='2'>Week Total</td>"+
     "<td class='num'>"+(weekRoll.scheduledSum>0?Math.round(weekRoll.scheduledSum).toLocaleString():"—")+"</td>"+
     "<td class='num'>"+(weekRoll.scheduledSum>0?weekRoll.droppedSum.toFixed(1):"—")+"</td>"+
     "<td class='num'>"+weekLostStr+"</td>"+
-    "<td class='num'>"+state.target.toFixed(2)+"%</td>"+
+    "<td class='num'>"+(target==null?"—":target.toFixed(2)+"%")+"</td>"+
     "<td class='num'>"+weekVariance+"</td>"+
     "<td></td>"+
   "</tr></tfoot>";
@@ -1257,6 +1279,7 @@ function renderDayTable(){
 // ---------- RENDER: CHART PANEL ----------
 function renderDayChart(){
   const depot = state.selectedDepot;
+  const target = depot===ALL_DEPOTS_KEY ? null : getDepotTarget(depot);
   const week = CALENDAR.find(w=>w.key===state.selectedWeekKey);
   document.getElementById("chartTitle").textContent = week ? "Lost Miles % — Wk "+week.weekNum : "Lost Miles % Trend";
   if (!week){ document.getElementById("chartLegend").innerHTML=""; document.getElementById("chartContainer").innerHTML=""; return; }
@@ -1277,11 +1300,11 @@ function renderDayChart(){
   }
 
   const series = [
-    { name:"Actual", type:"line", color:"#2D2A6E", points, dashed:false },
-    { name:"Target", type:"flat", color:"#27ae60", value: state.target, dashed:true }
+    { name:"Actual", type:"line", color:"#2D2A6E", points, dashed:false }
   ];
+  if (target!=null) series.push({ name:"Target", type:"flat", color:"#27ae60", value: target, dashed:true });
 
-  const runRate = computeDayRunRate(depot, week, state.target);
+  const runRate = target!=null ? computeDayRunRate(depot, week, target) : null;
   let runRateNote = "";
   if (runRate){
     const lastActual = [...points].reverse().find(p=>p.value!=null);
@@ -1304,13 +1327,14 @@ function renderDayChart(){
 
   document.getElementById("chartLegend").innerHTML =
     "<span><span class='legend-swatch' style='border-color:#2D2A6E'></span>Actual</span>"+
-    "<span><span class='legend-swatch' style='border-color:#27ae60;border-top-style:dashed'></span>Target ("+state.target.toFixed(2)+"%)</span>"+
+    (target!=null?"<span><span class='legend-swatch' style='border-color:#27ae60;border-top-style:dashed'></span>Target ("+target.toFixed(2)+"%)</span>":"")+
     (runRate?"<span><span class='legend-swatch' style='border-color:#E5007D;border-top-style:dashed'></span>Required run-rate</span>":"")+
     (weatherSeries.length?"<span><span class='legend-swatch' style='border-color:#3498db'></span>Rainfall (mm)</span><span><span class='legend-swatch' style='border-color:#e67e22'></span>Max Temp (°C)</span>":"")+
+    (target==null?"<div class='weather-note'>No single target for All Depots — select a depot to see target/run-rate.</div>":"")+
     (runRateNote?"<div style='width:100%;margin-top:4px'>"+runRateNote+"</div>":"")+
     (weatherNote?"<div class='weather-note'>"+weatherNote+"</div>":"");
 
-  renderChart(document.getElementById("chartContainer"), series, { labels, target: state.target, tooltip: document.getElementById("tooltipBox") });
+  renderChart(document.getElementById("chartContainer"), series, { labels, target: target||0, tooltip: document.getElementById("tooltipBox") });
 }
 
 function renderChartPanel(){
@@ -1318,6 +1342,7 @@ function renderChartPanel(){
   document.getElementById("chartTitle").textContent = "Lost Miles % Trend";
 
   const depot = state.selectedDepot;
+  const target = depot===ALL_DEPOTS_KEY ? null : getDepotTarget(depot);
   const isWeekly = state.view==="weekly";
   const weeksInFY = CALENDAR.filter(w=>w.fyLabel===state.fyLabel);
 
@@ -1345,11 +1370,11 @@ function renderChartPanel(){
   }
 
   const series = [
-    { name:"Actual", type:"line", color:"#2D2A6E", points, dashed:false },
-    { name:"Target", type:"flat", color:"#27ae60", value: state.target, dashed:true }
+    { name:"Actual", type:"line", color:"#2D2A6E", points, dashed:false }
   ];
+  if (target!=null) series.push({ name:"Target", type:"flat", color:"#27ae60", value: target, dashed:true });
 
-  const runRate = computeRunRate(depot, scopeWeeksForRunRate, weeklyRollups, state.target);
+  const runRate = target!=null ? computeRunRate(depot, scopeWeeksForRunRate, weeklyRollups, target) : null;
   let runRateNote = "";
   if (runRate){
     const lastActual = [...points].reverse().find(p=>p.value!=null);
@@ -1372,13 +1397,14 @@ function renderChartPanel(){
 
   document.getElementById("chartLegend").innerHTML =
     "<span><span class='legend-swatch' style='border-color:#2D2A6E'></span>Actual</span>"+
-    "<span><span class='legend-swatch' style='border-color:#27ae60;border-top-style:dashed'></span>Target ("+state.target.toFixed(2)+"%)</span>"+
+    (target!=null?"<span><span class='legend-swatch' style='border-color:#27ae60;border-top-style:dashed'></span>Target ("+target.toFixed(2)+"%)</span>":"")+
     (runRate?"<span><span class='legend-swatch' style='border-color:#E5007D;border-top-style:dashed'></span>Required run-rate</span>":"")+
     (weatherSeries.length?"<span><span class='legend-swatch' style='border-color:#3498db'></span>Rainfall (mm)</span><span><span class='legend-swatch' style='border-color:#e67e22'></span>Max Temp (°C)</span>":"")+
+    (target==null?"<div class='weather-note'>No single target for All Depots — select a depot to see target/run-rate.</div>":"")+
     (runRateNote?"<div style='width:100%;margin-top:4px'>"+runRateNote+"</div>":"")+
     (weatherNote?"<div class='weather-note'>"+weatherNote+"</div>":"");
 
-  renderChart(document.getElementById("chartContainer"), series, { labels, target: state.target, tooltip: document.getElementById("tooltipBox") });
+  renderChart(document.getElementById("chartContainer"), series, { labels, target: target||0, tooltip: document.getElementById("tooltipBox") });
 }
 
 // ---------- RENDER: WARNINGS ----------
@@ -1418,13 +1444,6 @@ function renderAll(){
 
 // ---------- BOOTSTRAP ----------
 document.addEventListener("DOMContentLoaded", () => {
-  const targetInput = document.getElementById("targetInput");
-  targetInput.value = state.target;
-  targetInput.addEventListener("change", ()=>{
-    const v = parseFloat(targetInput.value);
-    if (!isNaN(v) && v>=0){ state.target=v; saveState(state.rawData, state.target); renderAll(); }
-  });
-
   const postcodeInputsEl = document.getElementById("postcodeInputs");
   postcodeInputsEl.innerHTML = DEPOTS.map(d=>
     "<div class='postcode-row'><label>"+escapeHtml(d)+"</label>"+
@@ -1452,7 +1471,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const workbook = XLSX.read(data, { type:"array", cellDates:true });
         state.rawData = parseWorkbook(workbook);
         recompute();
-        saveState(state.rawData, state.target);
+        saveState(state.rawData);
         document.getElementById("uploadStatus").textContent = "Loaded "+file.name+" · "+new Date().toLocaleString("en-GB");
         renderAll();
       } catch(err){
@@ -1489,8 +1508,6 @@ document.addEventListener("DOMContentLoaded", () => {
   const saved = loadState();
   if (saved){
     state.rawData = saved.rawData;
-    state.target = saved.target || CONFIG.target;
-    targetInput.value = state.target;
     document.getElementById("uploadStatus").textContent = "Restored data from "+new Date(saved.savedAt).toLocaleString("en-GB");
   }
   recompute();
