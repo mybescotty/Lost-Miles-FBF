@@ -77,6 +77,7 @@ select.fy-select { padding:5px 8px; border-radius:5px; border:1px solid var(--bo
 
 .wo-table { width:100%; border-collapse:collapse; font-size:13px; }
 .wo-table th { background: var(--bg-header); color: var(--text-on-dark); padding:8px 10px; text-align:left; font-size:12px; white-space:nowrap; }
+.wo-table th.num { text-align:right; }
 .wo-table td { padding:7px 10px; border-bottom:1px solid #eaecef; white-space:nowrap; }
 .wo-table tbody tr:hover td { filter:brightness(0.96); }
 .wo-table tbody tr.row-green td { background: var(--row-green); }
@@ -1115,7 +1116,7 @@ function renderLeaderboard(){
 
   const rows = getLeaderboardRows(state.fyLabel);
   let html = "<table class='wo-table'><thead><tr>"+
-    "<th>Rank</th><th>Depot</th><th>Target %</th><th>Current Week Lost %</th><th>Current Period Lost %</th><th>Status</th>"+
+    "<th>Rank</th><th>Depot</th><th class='num'>Target %</th><th class='num'>Current Week Lost %</th><th class='num'>Current Period Lost %</th><th>Status</th>"+
     "</tr></thead><tbody>";
   rows.forEach((r,idx)=>{
     const rag = ragClass(r.periodPct, r.target);
@@ -1169,7 +1170,7 @@ function renderTable(){
   }
 
   let html = "<table class='wo-table'><thead><tr>"+
-    "<th>"+(isWeekly?"Week":"Period")+"</th><th>Dates</th><th>Scheduled Miles</th><th>Dropped Miles</th><th>Lost %</th><th>Target</th><th>Variance</th><th>Status</th>"+
+    "<th>"+(isWeekly?"Week":"Period")+"</th><th>Dates</th><th class='num'>Scheduled Miles</th><th class='num'>Dropped Miles</th><th class='num'>Lost %</th><th class='num'>Target</th><th class='num'>Variance</th><th>Status</th>"+
     "</tr></thead><tbody>";
 
   rows.forEach(row=>{
@@ -1229,7 +1230,7 @@ function renderDayTable(){
   titleEl.textContent = "Daily Breakdown — "+depot+" (Wk "+week.weekNum+", "+week.periodLabel+")";
 
   let html = "<table class='wo-table'><thead><tr>"+
-    "<th>Day</th><th>Date</th><th>Scheduled Miles</th><th>Dropped Miles</th><th>Lost %</th><th>Target</th><th>Variance</th><th>Status</th>"+
+    "<th>Day</th><th>Date</th><th class='num'>Scheduled Miles</th><th class='num'>Dropped Miles</th><th class='num'>Lost %</th><th class='num'>Target</th><th class='num'>Variance</th><th>Status</th>"+
     "</tr></thead><tbody>";
 
   const today = todayMidnight();
