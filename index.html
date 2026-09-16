@@ -97,6 +97,26 @@ select.fy-select { padding:5px 8px; border-radius:5px; border:1px solid var(--bo
 .legend-swatch { width:18px; height:0; border-top:3px solid #000; display:inline-block; }
 .tooltip-box { position:absolute; background:#2D2A6E; color:#fff; font-size:11px; padding:6px 8px; border-radius:4px; pointer-events:none; opacity:0; transition:opacity 0.1s; white-space:nowrap; z-index:10; }
 #chartContainer { width:100%; }
+
+#reportContainer { display:none; }
+.report-title { font-size:20px; font-weight:700; color:var(--text-primary); }
+.report-meta { font-size:12px; color:var(--text-secondary); margin-bottom:16px; }
+.report-section { padding-top:18px; }
+.report-header { font-size:16px; font-weight:700; color:var(--text-primary); margin-bottom:2px; }
+.report-sub { font-size:12px; color:var(--text-secondary); margin-bottom:10px; }
+.report-chart { width:100%; margin-bottom:10px; }
+.report-empty { font-size:12px; color:var(--text-secondary); font-style:italic; padding:10px 0; }
+
+@media print {
+  header, .layout { display:none !important; }
+  #reportContainer { display:block !important; }
+  .report-section { break-inside:avoid; page-break-after:always; }
+  .report-section:last-child { page-break-after:auto; }
+  .wo-table th { background:var(--bg-header) !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  .wo-table tbody tr.row-green td,
+  .wo-table tbody tr.row-amber td,
+  .wo-table tbody tr.row-red td { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+}
 </style>
 </head>
 <body>
@@ -131,6 +151,7 @@ select.fy-select { padding:5px 8px; border-radius:5px; border:1px solid var(--bo
       </select>
       <select class="fy-select" id="weekSelect" style="display:none"></select>
       <button class="action-btn" id="emailSummaryBtn">📧 Email Summary</button>
+      <button class="action-btn" id="printReportBtn">🖨 Print Report (All Depots)</button>
     </div>
 
     <div class="stat-tiles" id="statTiles"></div>
@@ -166,6 +187,11 @@ select.fy-select { padding:5px 8px; border-radius:5px; border:1px solid var(--bo
       <span id="postcodeStatus" style="font-size:11px;opacity:0.7;margin-left:8px"></span>
     </details>
   </div>
+</div>
+
+<div id="reportContainer">
+  <div class="report-title">Lost Miles Tracker — Current Week Report</div>
+  <div class="report-meta" id="reportMeta"></div>
 </div>
 <script>
 /*! xlsx.js (C) 2013-present SheetJS -- http://sheetjs.com */
@@ -1338,6 +1364,144 @@ function renderDayChart(){
   renderChart(document.getElementById("chartContainer"), series, { labels, target: target||0, tooltip: document.getElementById("tooltipBox") });
 }
 
+// ---------- REPORT: all-depot current-week print/PDF report ----------
+// Builds the Daily-view chart series for a given depot+week without touching global state,
+// so every depot can be rendered into its own container at once (mirrors renderDayChart's logic).
+function buildReportChartSeries(depot, week, target){
+  const labels = [];
+  const points = [];
+  const dayBuckets = [];
+  const today = todayMidnight();
+  let d = new Date(week.weekStart);
+  for (let i=0;i<7;i++){
+    const key = dateKey(d);
+    const future = d >= today;
+    const dayRow = future ? null : getDayRow(depot, key);
+    labels.push(DAY_NAMES[i]);
+    points.push({ i, value: (future || !dayRow) ? null : dayRow.lostMilesPct });
+    dayBuckets.push({ i, start:new Date(d), end:new Date(d) });
+    d = addDays(d,1);
+  }
+
+  const series = [{ name:"Actual", type:"line", color:"#2D2A6E", points, dashed:false }];
+  if (target!=null) series.push({ name:"Target", type:"flat", color:"#27ae60", value: target, dashed:true });
+
+  const runRate = target!=null ? computeDayRunRate(depot, week, target) : null;
+  if (runRate){
+    const lastActual = [...points].reverse().find(p=>p.value!=null);
+    if (lastActual){
+      const runRatePoints = points.map(p=>
+        p.i < lastActual.i ? {i:p.i, value:null} :
+        p.i===lastActual.i ? {i:p.i, value:lastActual.value} :
+        {i:p.i, value:runRate.requiredPct}
+      );
+      series.push({ name:"Required run-rate", type:"line", color:"#E5007D", points:runRatePoints, dashed:true, pointsRender:false });
+    }
+  }
+
+  series.push(...buildWeatherSeries(depot, state.fyLabel, dayBuckets));
+  return { labels, series };
+}
+
+// Mirrors renderDayTable()'s HTML, but returns a string for a given depot+week instead of
+// writing to the shared #tableContainer, so it can be used for one section per depot.
+function buildReportTableHtml(depot, week, target){
+  let html = "<table class='wo-table'><thead><tr>"+
+    "<th>Day</th><th>Date</th><th class='num'>Scheduled Miles</th><th class='num'>Dropped Miles</th><th class='num'>Lost %</th><th class='num'>Target</th><th class='num'>Variance</th><th>Status</th>"+
+    "</tr></thead><tbody>";
+
+  const today = todayMidnight();
+  let d = new Date(week.weekStart);
+  for (let i=0;i<7;i++){
+    const key = dateKey(d);
+    const future = d >= today;
+    const dayRow = future ? null : getDayRow(depot, key);
+    const noData = !future && (!dayRow || dayRow.lostMilesPct==null);
+    const blank = future || noData;
+    const lostPct = blank ? null : dayRow.lostMilesPct;
+    const rowClass = future ? "row-future" : noData ? "" : "row-"+ragClass(lostPct, target);
+    const lostStr = blank ? "—" : lostPct.toFixed(2)+"%";
+    const variance = (blank || target==null) ? "—" : (lostPct-target>=0?"+":"")+(lostPct-target).toFixed(2)+"pp";
+    const statusBadge = future ? "<span class='badge-navy'>Upcoming</span>"
+      : noData ? "<span class='badge-navy'>No data</span>"
+      : "<span class='badge-green'>Complete</span>";
+    html += "<tr class='"+rowClass+"'>"+
+      "<td>"+DAY_NAMES[i]+"</td>"+
+      "<td>"+d.toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})+"</td>"+
+      "<td class='num'>"+(blank?"—":Math.round(dayRow.scheduledMiles).toLocaleString())+"</td>"+
+      "<td class='num'>"+(blank?"—":dayRow.droppedMiles.toFixed(1))+"</td>"+
+      "<td class='num'>"+lostStr+"</td>"+
+      "<td class='num'>"+(target==null?"—":target.toFixed(2)+"%")+"</td>"+
+      "<td class='num'>"+variance+"</td>"+
+      "<td>"+statusBadge+"</td>"+
+    "</tr>";
+    d = addDays(d,1);
+  }
+
+  const weekRoll = weeklyRollups[depot][week.key];
+  const weekLostStr = weekRoll.lostPct==null ? "—" : weekRoll.lostPct.toFixed(2)+"%";
+  const weekVariance = (weekRoll.lostPct==null || target==null) ? "—" : (weekRoll.lostPct-target>=0?"+":"")+(weekRoll.lostPct-target).toFixed(2)+"pp";
+  html += "</tbody><tfoot><tr>"+
+    "<td colspan='2'>Week Total</td>"+
+    "<td class='num'>"+(weekRoll.scheduledSum>0?Math.round(weekRoll.scheduledSum).toLocaleString():"—")+"</td>"+
+    "<td class='num'>"+(weekRoll.scheduledSum>0?weekRoll.droppedSum.toFixed(1):"—")+"</td>"+
+    "<td class='num'>"+weekLostStr+"</td>"+
+    "<td class='num'>"+(target==null?"—":target.toFixed(2)+"%")+"</td>"+
+    "<td class='num'>"+weekVariance+"</td>"+
+    "<td></td>"+
+  "</tr></tfoot>";
+  html += "</table>";
+  return html;
+}
+
+// Builds one section per depot (header, chart, table) for the current week into #reportContainer,
+// then triggers the browser's print dialog — "Save as PDF" there is the actual PDF output.
+function buildAndPrintReport(){
+  const fyLabel = state.fyLabel;
+  const weekKey = defaultWeekKeyForFY(fyLabel);
+  const week = CALENDAR.find(w=>w.key===weekKey);
+  const container = document.getElementById("reportContainer");
+  const metaEl = document.getElementById("reportMeta");
+
+  container.querySelectorAll(".report-section").forEach(el=>el.remove());
+
+  if (!week){
+    metaEl.textContent = "No current week available for "+fyLabel+".";
+    window.print();
+    return;
+  }
+  metaEl.textContent = "Wk "+week.weekNum+" · "+week.periodLabel+" · "+fmtRange(week.weekStart, week.weekEnd)+" · Generated "+new Date().toLocaleString("en-GB");
+
+  DEPOTS.forEach(depot=>{
+    const target = getDepotTarget(depot);
+    const roll = weeklyRollups[depot][week.key];
+    const hasData = roll.scheduledSum>0;
+    const lostStr = roll.lostPct==null ? "—" : roll.lostPct.toFixed(2)+"%";
+    const varianceVal = roll.lostPct!=null ? roll.lostPct-target : null;
+    const varianceStr = varianceVal==null ? "—" : (varianceVal>=0?"+":"")+varianceVal.toFixed(2)+"pp";
+    const safeId = depot.replace(/\s+/g,"_");
+
+    const section = document.createElement("div");
+    section.className = "report-section";
+    section.innerHTML =
+      "<div class='report-header'>"+escapeHtml(depot)+"</div>"+
+      "<div class='report-sub'>Target "+target.toFixed(2)+"% &nbsp;·&nbsp; Current Week Lost % "+lostStr+
+        (varianceVal!=null?" (variance "+varianceStr+")":"")+"</div>"+
+      (hasData
+        ? "<div class='report-chart' id='reportChart-"+safeId+"'></div><div id='reportTable-"+safeId+"'></div>"
+        : "<div class='report-empty'>No mileage data uploaded for "+escapeHtml(depot)+" this week.</div>");
+    container.appendChild(section);
+
+    if (hasData){
+      const chartData = buildReportChartSeries(depot, week, target);
+      renderChart(document.getElementById("reportChart-"+safeId), chartData.series, { labels: chartData.labels, target: target||0, tooltip: null });
+      document.getElementById("reportTable-"+safeId).innerHTML = buildReportTableHtml(depot, week, target);
+    }
+  });
+
+  window.print();
+}
+
 function renderChartPanel(){
   if (state.view==="day"){ renderDayChart(); return; }
   document.getElementById("chartTitle").textContent = "Lost Miles % Trend";
@@ -1504,6 +1668,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("emailSummaryBtn").addEventListener("click", ()=>{
     window.location.href = buildMailtoHref();
+  });
+
+  document.getElementById("printReportBtn").addEventListener("click", ()=>{
+    buildAndPrintReport();
   });
 
   const saved = loadState();
