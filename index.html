@@ -30,6 +30,8 @@ header .tagline { font-size:10px; opacity:0.55; letter-spacing:0.05em; margin-to
 
 .upload-btn { background: var(--accent); color:#fff; border:none; border-radius:5px; padding:7px 14px; font-size:13px; cursor:pointer; }
 .upload-btn:hover { background: var(--accent-hover); }
+.link-btn { background:transparent; color:#fff; border:1px solid rgba(255,255,255,0.55); border-radius:5px; padding:6px 12px; font-size:13px; text-decoration:none; white-space:nowrap; }
+.link-btn:hover { background:rgba(255,255,255,0.12); border-color:#fff; }
 
 .action-btn { background:#27ae60; color:#fff; border:none; border-radius:5px; padding:4px 12px; font-size:12px; cursor:pointer; }
 .action-btn:hover { background:#219a52; }
@@ -127,6 +129,8 @@ select.fy-select { padding:5px 8px; border-radius:5px; border:1px solid var(--bo
   </div>
   <div class="header-right">
     <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none">
+    <a class="link-btn" id="downloadDataBtn" target="_blank" rel="noopener" style="display:none" title="Downloads the latest workbook from SharePoint (sign in with your work account if asked)">⬇ Download Latest Data</a>
+    <a class="link-btn" id="openDataBtn" target="_blank" rel="noopener" style="display:none" title="Opens the workbook on SharePoint in a new tab">📂 Open in SharePoint</a>
     <button class="upload-btn" id="uploadBtn">Upload Workbook</button>
     <span id="uploadStatus" style="font-size:11px;opacity:0.75"></span>
   </div>
@@ -255,6 +259,27 @@ function getDepotTarget(depot){
 const ALL_DEPOTS_KEY = "All Depots";
 const PERIOD_PATTERN = [4,4,5,4,4,5,4,4,5,4,4,5]; // weeks per period, 12 periods, 52 weeks/FY
 const STORAGE_KEY = "lostMilesTracker.v1";
+
+// SharePoint link to the source workbook. Paste the share link between the quotes;
+// leave empty to hide the Download / Open buttons.
+const DATA_FILE_URL = "";
+
+// Turn a SharePoint link into one that downloads the file instead of opening Excel Online.
+function toSharePointDownloadUrl(url){
+  try {
+    const u = new URL(url);
+    // Library links like .../_layouts/15/Doc.aspx?sourcedoc={GUID}&...
+    const src = u.searchParams.get("sourcedoc");
+    if (src && /\/_layouts\/15\/(Doc|WopiFrame)\.aspx$/i.test(u.pathname)) {
+      const guid = src.replace(/[{}]/g, "");
+      const base = u.pathname.replace(/\/_layouts\/15\/.*$/i, "");
+      return u.origin + base + "/_layouts/15/download.aspx?UniqueId=" + encodeURIComponent(guid);
+    }
+    // Sharing links (.../:x:/s/...) and direct file paths accept download=1
+    u.searchParams.set("download", "1");
+    return u.toString();
+  } catch(e){ return url; }
+}
 
 const CONFIG = {
   target: 0.2,           // lost miles % target - placeholder until hardcoded per depot later
@@ -1625,6 +1650,11 @@ document.addEventListener("DOMContentLoaded", () => {
     renderAll();
   });
 
+  if (DATA_FILE_URL) {
+    const dl = document.getElementById("downloadDataBtn"), op = document.getElementById("openDataBtn");
+    dl.href = toSharePointDownloadUrl(DATA_FILE_URL); dl.style.display = "";
+    op.href = DATA_FILE_URL; op.style.display = "";
+  }
   document.getElementById("uploadBtn").addEventListener("click", ()=> document.getElementById("fileInput").click());
   document.getElementById("fileInput").addEventListener("change", (e)=>{
     const file = e.target.files[0];
