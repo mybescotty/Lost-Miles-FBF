@@ -129,7 +129,6 @@ select.fy-select { padding:5px 8px; border-radius:5px; border:1px solid var(--bo
   </div>
   <div class="header-right">
     <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none">
-    <a class="link-btn" id="downloadDataBtn" target="_blank" rel="noopener" style="display:none" title="Downloads the latest workbook from SharePoint (sign in with your work account if asked)">⬇ Download Latest Data</a>
     <a class="link-btn" id="openDataBtn" target="_blank" rel="noopener" style="display:none" title="Opens the workbook on SharePoint in a new tab">📂 Open in SharePoint</a>
     <button class="upload-btn" id="uploadBtn">Upload Workbook</button>
     <span id="uploadStatus" style="font-size:11px;opacity:0.75"></span>
@@ -261,25 +260,9 @@ const PERIOD_PATTERN = [4,4,5,4,4,5,4,4,5,4,4,5]; // weeks per period, 12 period
 const STORAGE_KEY = "lostMilesTracker.v1";
 
 // SharePoint link to the source workbook. Paste the share link between the quotes;
-// leave empty to hide the Download / Open buttons.
+// leave empty to hide the Open in SharePoint button.
 const DATA_FILE_URL = "https://firstukbus.sharepoint.com/:x:/s/EDHOE/IQB80dBXxLg-R6hYVliolXhbAbrS0d-yhU2iyS3NB3W6_es?e=pQZ3oP";
 
-// Turn a SharePoint link into one that downloads the file instead of opening Excel Online.
-function toSharePointDownloadUrl(url){
-  try {
-    const u = new URL(url);
-    // Library links like .../_layouts/15/Doc.aspx?sourcedoc={GUID}&...
-    const src = u.searchParams.get("sourcedoc");
-    if (src && /\/_layouts\/15\/(Doc|WopiFrame)\.aspx$/i.test(u.pathname)) {
-      const guid = src.replace(/[{}]/g, "");
-      const base = u.pathname.replace(/\/_layouts\/15\/.*$/i, "");
-      return u.origin + base + "/_layouts/15/download.aspx?UniqueId=" + encodeURIComponent(guid);
-    }
-    // Sharing links (.../:x:/s/...) and direct file paths accept download=1
-    u.searchParams.set("download", "1");
-    return u.toString();
-  } catch(e){ return url; }
-}
 
 const CONFIG = {
   target: 0.2,           // lost miles % target - placeholder until hardcoded per depot later
@@ -1651,8 +1634,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   if (DATA_FILE_URL) {
-    const dl = document.getElementById("downloadDataBtn"), op = document.getElementById("openDataBtn");
-    dl.href = toSharePointDownloadUrl(DATA_FILE_URL); dl.style.display = "";
+    const op = document.getElementById("openDataBtn");
     op.href = DATA_FILE_URL; op.style.display = "";
   }
   document.getElementById("uploadBtn").addEventListener("click", ()=> document.getElementById("fileInput").click());
