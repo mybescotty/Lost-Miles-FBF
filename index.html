@@ -131,6 +131,7 @@ select.fy-select { padding:5px 8px; border-radius:5px; border:1px solid var(--bo
     <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none">
     <a class="link-btn" id="openDataBtn" target="_blank" rel="noopener" style="display:none" title="Opens the workbook on SharePoint in a new tab">📂 Open in SharePoint</a>
     <button class="upload-btn" id="uploadBtn">Upload Workbook</button>
+    <button class="link-btn" id="shareHtmlBtn" title="Download a copy of this tracker with the loaded data built in, to send to someone">🔗 Share as HTML</button>
     <span id="uploadStatus" style="font-size:11px;opacity:0.75"></span>
   </div>
 </header>
@@ -1615,8 +1616,47 @@ function renderAll(){
   renderWarnings();
 }
 
+// ---------- SHAREABLE HTML ----------
+// A shared copy is this same page with the data embedded as a JSON <script> block. The
+// recipient opens the file and sees the data straight away, without uploading anything.
+const SHARED_DATA_ID = "sharedTrackerData";
+let pristineHtml = null; // page markup captured before first render, so the copy starts clean
+
+function capturePristineHtml(){
+  const clone = document.documentElement.cloneNode(true);
+  const old = clone.querySelector("#"+SHARED_DATA_ID);
+  if (old) old.remove();
+  pristineHtml = "<!DOCTYPE html>\n" + clone.outerHTML;
+}
+function loadSharedData(){
+  const el = document.getElementById(SHARED_DATA_ID);
+  if (!el) return null;
+  try {
+    const parsed = JSON.parse(el.textContent);
+    Object.keys(parsed.rawData).forEach(depot => {
+      parsed.rawData[depot].forEach(row => { row.date = new Date(row.date); });
+    });
+    return parsed;
+  } catch(e){ return null; }
+}
+function downloadShareableHtml(){
+  if (!state.rawData){ alert("Upload a workbook first, then share."); return; }
+  const payload = { rawData: state.rawData, savedAt: new Date().toISOString() };
+  // Escape "<" so the data can never close the script tag early.
+  const json = JSON.stringify(payload).replace(/</g, "\\u003c");
+  const tag = '<script type="application/json" id="'+SHARED_DATA_ID+'">'+json+'</scr'+'ipt>';
+  const html = pristineHtml.replace("</head>", tag+"\n</head>");
+  const blob = new Blob([html], { type:"text/html" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "Lost-Miles-Tracker-" + dateKey(new Date()) + ".html";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+}
+
 // ---------- BOOTSTRAP ----------
 document.addEventListener("DOMContentLoaded", () => {
+  capturePristineHtml();
   const postcodeInputsEl = document.getElementById("postcodeInputs");
   postcodeInputsEl.innerHTML = DEPOTS.map(d=>
     "<div class='postcode-row'><label>"+escapeHtml(d)+"</label>"+
@@ -1686,8 +1726,15 @@ document.addEventListener("DOMContentLoaded", () => {
     buildAndPrintReport();
   });
 
-  const saved = loadState();
-  if (saved){
+  document.getElementById("shareHtmlBtn").addEventListener("click", downloadShareableHtml);
+
+  const shared = loadSharedData();
+  const saved = shared ? null : loadState();
+  if (shared){
+    // Shared copy: show the embedded data, but don't overwrite the recipient's own saved data.
+    state.rawData = shared.rawData;
+    document.getElementById("uploadStatus").textContent = "Shared data from "+new Date(shared.savedAt).toLocaleString("en-GB");
+  } else if (saved){
     state.rawData = saved.rawData;
     document.getElementById("uploadStatus").textContent = "Restored data from "+new Date(saved.savedAt).toLocaleString("en-GB");
   }
